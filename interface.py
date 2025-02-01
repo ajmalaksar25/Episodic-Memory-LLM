@@ -1,19 +1,61 @@
 import streamlit as st
 import asyncio
-from episodic_memory import EpisodicMemoryLLM, MemoryPriority
+from episodic_memory import EpisodicMemoryModule, MemoryPriority
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 import networkx as nx
 import pandas as pd
 import json
+import os
+from langchain_groq import ChatGroq
+from langchain.chains import LLMChain
+from langchain_core.prompts import (
+    ChatPromptTemplate,
+    HumanMessagePromptTemplate,
+    MessagesPlaceholder,
+)
+from langchain_core.messages import SystemMessage
+from langchain.chains.conversation.memory import ConversationBufferWindowMemory
 
 # Initialize session state
 if 'memory_llm' not in st.session_state:
-    st.session_state.memory_llm = EpisodicMemoryLLM()
+    st.session_state.memory_llm = EpisodicMemoryModule()
 if 'knowledge_graph' not in st.session_state:
     st.session_state.knowledge_graph = nx.Graph()
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now()
+if 'chat_history' not in st.session_state:
+    st.session_state.chat_history = []
+if 'conversation' not in st.session_state:
+    # Initialize Groq chat
+    groq_api_key = os.environ['GROQ_API_KEY']
+    model = 'llama3-8b-8192'
+    groq_chat = ChatGroq(
+        groq_api_key=groq_api_key, 
+        model_name=model
+    )
+    
+    # Initialize conversation memory and chain
+    system_prompt = 'You are a friendly conversational chatbot'
+    conversational_memory_length = 5
+    memory = ConversationBufferWindowMemory(
+        k=conversational_memory_length, 
+        memory_key="chat_history", 
+        return_messages=True
+    )
+    
+    prompt = ChatPromptTemplate.from_messages([
+        SystemMessage(content=system_prompt),
+        MessagesPlaceholder(variable_name="chat_history"),
+        HumanMessagePromptTemplate.from_template("{human_input}")
+    ])
+    
+    st.session_state.conversation = LLMChain(
+        llm=groq_chat,
+        prompt=prompt,
+        verbose=False,
+        memory=memory,
+    )
 
 async def update_knowledge_graph():
     """Update the knowledge graph with current entity relationships"""
@@ -98,67 +140,120 @@ def plot_knowledge_graph():
     return fig
 
 async def main():
-    st.title("Episodic Memory LLM Dashboard")
+    st.title("AI Chat & Memory Dashboard")
     
-    # Add auto-refresh functionality
-    auto_refresh = st.sidebar.checkbox("Auto-refresh", value=True)
-    if auto_refresh:
-        st.sidebar.info(f"Last update: {st.session_state.last_update.strftime('%H:%M:%S')}")
+    # Create tabs for Chat and Memory Management
+    tab1, tab2 = st.tabs(["Chat", "Memory Management"])
     
-    # Memory Input Section
-    st.sidebar.header("Add New Memory")
-    memory_text = st.sidebar.text_area("Memory Text")
-    category = st.sidebar.text_input("Category")
-    priority = st.sidebar.selectbox(
-        "Priority",
-        [MemoryPriority.LOW, MemoryPriority.MEDIUM, MemoryPriority.HIGH],
-        format_func=lambda x: x.name
-    )
-    
-    if st.sidebar.button("Store Memory"):
-        if memory_text and category:
-            with st.spinner("Storing memory..."):
-                memory_id = await st.session_state.memory_llm.store_memory(
-                    memory_text,
-                    {"category": category},
-                    priority
-                )
-                await update_knowledge_graph()
-                st.sidebar.success(f"Memory stored with ID: {memory_id}")
-
-    # Main content area with tabs
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "Memory Search", "Knowledge Graph", "Statistics", "Entity Analysis"
-    ])
-    
-    # Tab 1: Memory Search
+    # Tab 1: Chat Interface
     with tab1:
-        st.header("Search Memories")
-        search_query = st.text_input("Search Query")
-        search_category = st.text_input("Category Filter (optional)")
+        st.header("Chat")
         
-        col1, col2 = st.columns(2)
-        with col1:
-            days_ago = st.number_input("Days to Look Back", min_value=1, value=7)
-        with col2:
-            max_results = st.number_input("Max Results", min_value=1, value=5)
+        # Display chat history
+        for message in st.session_state.chat_history:
+            with st.chat_message("user" if message.get('role') == 'user' else "assistant"):
+                st.write(message.get('content'))
+        
+        # Chat input
+        if prompt := st.chat_input("Type your message here..."):
+            # Add user message to chat history
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.write(prompt)
             
-        if st.button("Search"):
-            with st.spinner("Searching..."):
-                start_time = datetime.now() - timedelta(days=days_ago)
-                results = await st.session_state.memory_llm.recall_memories_advanced(
-                    query=search_query,
-                    filters={"category": search_category} if search_category else None,
-                    time_range=(start_time, datetime.now()),
-                    max_results=max_results
-                )
+            # Get bot response
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
+                    response = st.session_state.conversation.predict(human_input=prompt)
+                    st.write(response)
+                    st.session_state.chat_history.append({"role": "assistant", "content": response})
+            
+            # Store the interaction in episodic memory
+            await st.session_state.memory_llm.store_memory(
+                text=f"User: {prompt}\nAssistant: {response}",
+                metadata={"category": "conversation"},
+                priority=MemoryPriority.MEDIUM
+            )
+            await update_knowledge_graph()
+    
+    # Tab 2: Memory Management
+    with tab2:
+        # Add auto-refresh functionality
+        auto_refresh = st.sidebar.checkbox("Auto-refresh", value=True)
+        if auto_refresh:
+            st.sidebar.info(f"Last update: {st.session_state.last_update.strftime('%H:%M:%S')}")
+        
+        # Memory management tabs
+        mem_tab1, mem_tab2, mem_tab3, mem_tab4 = st.tabs([
+            "Memory Search", "Knowledge Graph", "Statistics", "Entity Analysis"
+        ])
+        
+        # Tab 2.1: Memory Search
+        with mem_tab1:
+            st.header("Search Memories")
+            search_query = st.text_input("Search Query")
+            search_category = st.text_input("Category Filter (optional)")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                days_ago = st.number_input("Days to Look Back", min_value=1, value=7)
+            with col2:
+                max_results = st.number_input("Max Results", min_value=1, value=5)
                 
-                if results:
-                    for idx, result in enumerate(results, 1):
-                        with st.expander(f"Result {idx}: {result['text'][:100]}..."):
-                            st.write(result)
-                else:
-                    st.info("No results found")
+            if st.button("Search"):
+                with st.spinner("Searching..."):
+                    start_time = datetime.now() - timedelta(days=days_ago)
+                    results = await st.session_state.memory_llm.recall_memories_advanced(
+                        query=search_query,
+                        filters={"category": search_category} if search_category else None,
+                        time_range=(start_time, datetime.now()),
+                        max_results=max_results
+                    )
+                    
+                    if results:
+                        for idx, result in enumerate(results, 1):
+                            with st.expander(f"Result {idx}: {result['text'][:100]}..."):
+                                st.write(result)
+                    else:
+                        st.info("No results found")
+        
+        # Tab 2.2: Knowledge Graph
+        with mem_tab2:
+            st.header("Knowledge Graph")
+            st.plotly_chart(plot_knowledge_graph(), use_container_width=True)
+        
+        # Tab 2.3: Statistics
+        with mem_tab3:
+            st.header("Memory Statistics")
+            stats = await st.session_state.memory_llm.get_memory_stats()
+            if stats:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Total Memories", stats.get("memory_count", 0))
+                    st.metric("Average Importance", round(stats.get("avg_importance", 0), 2))
+                with col2:
+                    st.write("Categories:", ", ".join(stats.get("categories", [])))
+                    
+                # Age distribution chart
+                age_dist = stats.get("age_distribution", {})
+                if age_dist:
+                    st.bar_chart(age_dist)
+        
+        # Tab 2.4: Entity Analysis
+        with mem_tab4:
+            st.header("Entity Analysis")
+            if st.button("Analyze Entities"):
+                with st.spinner("Analyzing entity relationships..."):
+                    relationships = await st.session_state.memory_llm.get_entity_relationships()
+                    if relationships:
+                        for rel in relationships:
+                            with st.expander(f"{rel['entity1']} ↔ {rel['entity2']}"):
+                                st.write(f"Relationship Strength: {rel['relationship_strength']}")
+                                st.write("Shared Contexts:")
+                                for context in rel['shared_contexts']:
+                                    st.write(f"- {context}")
+                    else:
+                        st.info("No significant entity relationships found")
 
 if __name__ == "__main__":
     asyncio.run(main())

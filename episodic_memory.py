@@ -178,7 +178,7 @@ class EpisodicMemoryModule:
         priority: Union[MemoryPriority, str] = MemoryPriority.MEDIUM,
         skip_entity_extraction: bool = False
     ) -> str:
-        """Store a new memory with integrated entity processing"""
+        """Store a new memory with improved error handling"""
         try:
             if not text:
                 raise ValueError("Memory text cannot be empty")
@@ -197,35 +197,44 @@ class EpisodicMemoryModule:
             importance = self.config.priority_levels[priority.value]
             
             # Add basic metadata
-            metadata["importance"] = importance
-            metadata["conversation_id"] = conversation_id or "default"
-            metadata["timestamp"] = datetime.now().isoformat()
-            metadata["priority"] = priority.value
-            
-            # Validate and complete metadata
-            metadata = self.validate_metadata(metadata)
+            metadata.update({
+                "importance": importance,
+                "conversation_id": conversation_id or "default",
+                "timestamp": datetime.now().isoformat(),
+                "priority": priority.value
+            })
             
             memory_id = str(uuid.uuid4())
             
-            # Extract entities only if not skipped
-            entities = {} if skip_entity_extraction else await self._extract_entities(text)
+            # Extract entities only if not skipped and Neo4j is available
+            entities = {}
+            if not skip_entity_extraction:
+                entities = await self._extract_entities(text)
             
-            with self.driver.session() as session:
-                # Create memory and process entities in a single transaction
-                session.execute_write(
-                    self._create_memory_with_entities,
-                    memory_id=memory_id,
-                    text=text,
-                    metadata=metadata,
-                    entities=entities
+            # Store in Neo4j if available
+            if self.driver:
+                try:
+                    with self.driver.session() as session:
+                        session.execute_write(
+                            self._create_memory_with_entities,
+                            memory_id=memory_id,
+                            text=text,
+                            metadata=metadata,
+                            entities=entities
+                        )
+                except Exception as e:
+                    print(f"Warning: Neo4j storage failed: {e}")
+            
+            # Store in ChromaDB (vector store)
+            try:
+                self.collection.add(
+                    documents=[text],
+                    metadatas=[metadata],
+                    ids=[memory_id]
                 )
-                
-            # Update context window with new memory
-            self._update_context_window([{
-                "text": text,
-                "importance": importance,
-                "category": metadata.get("category", "general")
-            }])
+            except Exception as e:
+                print(f"Error storing in ChromaDB: {e}")
+                return None
             
             return memory_id
             
@@ -607,56 +616,25 @@ class EpisodicMemoryModule:
                 }
 
     async def _extract_entities(self, text: str) -> Dict[str, List[str]]:
-        """Extract entities from text using spaCy"""
-        print("\nDEBUG [EpisodicMemoryModule._extract_entities] Processing text:", text)
+        """Extract entities from text with improved error handling"""
         try:
             if not text:
                 return {}
             
             doc = self.nlp(text)
-            # Initialize only non-empty categories
-            entities = {category: set() for category, types in self.entity_config["config"].items() 
-                       if types or category == "GENERAL"}  # Special handling for GENERAL
+            entities = {category: set() for category in self.entity_config.keys()}
             
-            try:
-                # Process named entities
-                for ent in doc.ents:
-                    categorized = False
-                    # Find the appropriate category for this entity type
-                    for category, entity_types in self.entity_config["config"].items():
-                        if entity_types and ent.label_ in entity_types:
-                            entities[category].add(ent.text.lower())
-                            categorized = True
-                            break
-                    
-                    # If not categorized and it's a valid entity, add to GENERAL
-                    if not categorized and "GENERAL" in entities:
-                        entities["GENERAL"].add(ent.text.lower())
-                
-                # Process noun phrases and technical terms
-                for token in doc:
-                    if token.pos_ in ['NOUN', 'PROPN'] and len(token.text) > 2:
-                        term = token.text.lower()
-                        # Check if it matches technical patterns
-                        if any(re.search(pattern, term) for pattern in self.entity_config["tech_patterns"]):
-                            entities["TECHNOLOGY"].add(term)
-                        # If not already categorized anywhere, add to GENERAL
-                        elif not any(term in entity_set for entity_set in entities.values()):
-                            entities["GENERAL"].add(term)
-                
-                # Convert sets to lists and remove empty categories
-                result = {k: list(v) for k, v in entities.items() if v}
-                print(f"Extracted entities from text: {result}")
-                return result
-                
-            except Exception as e:
-                print(f"Error processing entities: {e}")
-                traceback.print_exc()  # Add stack trace for better debugging
-                return {}
-                
+            for ent in doc.ents:
+                for category, types in self.entity_config.items():
+                    if ent.label_ in types:
+                        entities[category].add(ent.text.lower())
+                        break
+            
+            # Convert sets to lists for JSON serialization
+            return {k: list(v) for k, v in entities.items() if v}
+            
         except Exception as e:
             print(f"Error in entity extraction: {e}")
-            traceback.print_exc()
             return {}
 
     def _update_context_window(self, new_memories: List[Dict]):

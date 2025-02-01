@@ -24,3 +24,7 @@ altair==5.4.1
 pydeck==0.9.1
 pillow==11.0.0
 en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+
+openai==1.60.1
+langchain_groq==0.2.3
+langchain==0.3.15 

@@ -1,0 +1,5 @@
+mermaid.md
+/.specstory
+/chroma_db
+/__pycache__
+.env

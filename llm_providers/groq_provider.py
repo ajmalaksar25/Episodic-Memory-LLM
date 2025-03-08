@@ -140,6 +140,37 @@ class GroqProvider(LLMProvider):
                 "key_interactions": []
             }
 
+    async def generate_text(self, prompt: str, max_tokens: int = None) -> str:
+        """
+        Generate text using Groq API.
+        
+        Args:
+            prompt: The prompt to generate text from
+            max_tokens: Maximum number of tokens to generate (overrides instance default if provided)
+            
+        Returns:
+            Generated text as a string
+        """
+        try:
+            # Use provided max_tokens if available, otherwise use instance default
+            tokens_limit = max_tokens if max_tokens is not None else self.max_tokens
+            
+            completion = self.client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                model=self.model_name,
+                temperature=self.temperature,
+                max_tokens=tokens_limit
+            )
+            
+            return completion.choices[0].message.content
+            
+        except Exception as e:
+            print(f"Error generating text: {e}")
+            return f"Error generating text: {str(e)}"
+
     def _parse_json_response(self, response_text: str) -> Dict:
         """Helper method to parse JSON responses"""
         try:

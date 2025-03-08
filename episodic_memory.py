@@ -178,69 +178,87 @@ class EpisodicMemoryModule:
         priority: Union[MemoryPriority, str] = MemoryPriority.MEDIUM,
         skip_entity_extraction: bool = False
     ) -> str:
-        """Store a new memory with improved error handling"""
-        try:
-            if not text:
-                raise ValueError("Memory text cannot be empty")
+        """
+        Store a new memory with improved importance calculation and entity extraction.
+        
+        Args:
+            text: The text to store as a memory
+            metadata: Optional metadata to associate with the memory
+            conversation_id: Optional conversation ID to associate with the memory
+            priority: Priority level for the memory (affects importance)
+            skip_entity_extraction: Whether to skip entity extraction
             
-            # Initialize metadata if None
-            metadata = metadata or {}
-            
-            # Handle priority
-            if isinstance(priority, str):
-                try:
-                    priority = MemoryPriority[priority.upper()]
-                except KeyError:
-                    priority = MemoryPriority.MEDIUM
-            
-            # Convert priority to importance value
-            importance = self.config.priority_levels[priority.value]
-            
-            # Add basic metadata
-            metadata.update({
-                "importance": importance,
-                "conversation_id": conversation_id or "default",
-                "timestamp": datetime.now().isoformat(),
-                "priority": priority.value
-            })
-            
-            memory_id = str(uuid.uuid4())
-            
-            # Extract entities only if not skipped and Neo4j is available
-            entities = {}
-            if not skip_entity_extraction:
-                entities = await self._extract_entities(text)
-            
-            # Store in Neo4j if available
-            if self.driver:
-                try:
-                    with self.driver.session() as session:
-                        session.execute_write(
-                            self._create_memory_with_entities,
-                            memory_id=memory_id,
-                            text=text,
-                            metadata=metadata,
-                            entities=entities
-                        )
-                except Exception as e:
-                    print(f"Warning: Neo4j storage failed: {e}")
-            
-            # Store in ChromaDB (vector store)
-            try:
-                self.collection.add(
-                    documents=[text],
-                    metadatas=[metadata],
-                    ids=[memory_id]
-                )
-            except Exception as e:
-                print(f"Error storing in ChromaDB: {e}")
-                return None
-            
-            return memory_id
-            
-        except Exception as e:
-            print(f"Error storing memory: {e}")
+        Returns:
+            ID of the stored memory
+        """
+        if not text:
             return None
+            
+        # Generate a unique ID for the memory
+        memory_id = str(uuid.uuid4())
+        
+        # Prepare metadata
+        if metadata is None:
+            metadata = {}
+        
+        # Add conversation ID to metadata if provided
+        if conversation_id:
+            metadata["conversation_id"] = conversation_id
+            
+        # Add priority to metadata
+        if isinstance(priority, MemoryPriority):
+            metadata["priority"] = priority.value
+        else:
+            metadata["priority"] = priority
+            
+        # Calculate importance score
+        importance = await self._calculate_memory_importance(text, metadata)
+        
+        # Current timestamp
+        timestamp = datetime.now().isoformat()
+        
+        # Add memory to vector store
+        self.collection.add(
+            documents=[text],
+            metadatas=[{
+                "id": memory_id,
+                "timestamp": timestamp,
+                "importance": importance,
+                **metadata
+            }],
+            ids=[memory_id]
+        )
+        
+        # Extract entities if not skipped
+        entities = {}
+        if not skip_entity_extraction:
+            entities = await self._extract_entities(text)
+        
+        # Store memory in Neo4j with entities
+        with self.driver.session() as session:
+            session.execute_write(
+                self._create_memory_with_entities,
+                memory_id=memory_id,
+                text=text,
+                metadata={
+                    "timestamp": timestamp,
+                    "importance": importance,
+                    **metadata
+                },
+                entities=entities
+            )
+            
+        # Update context window with the new memory
+        self._update_context_window([{
+            "id": memory_id,
+            "text": text,
+            "timestamp": timestamp,
+            "importance": importance,
+            "metadata": metadata,
+            "entities": entities
+        }])
+            
+        return memory_id
 
     def _create_memory_with_entities(self, tx, memory_id: str, text: str, metadata: Dict, entities: Dict):
         """Create memory node and entity relationships in a single transaction"""
@@ -310,42 +328,56 @@ class EpisodicMemoryModule:
         min_importance: float = 0.0, 
         top_k: int = 5
     ) -> List[Dict]:
-        """Recall memories with improved error handling and performance"""
-        try:
-            where_clause = self._build_where_clause(category, conversation_id, min_importance)
+        """
+        Recall memories related to a query, with optional filtering by category and conversation.
+        
+        Args:
+            query: The query to search for related memories
+            category: Optional category to filter memories
+            conversation_id: Optional conversation ID to filter memories
+            min_importance: Minimum importance score for memories to be returned
+            top_k: Maximum number of memories to return
             
+        Returns:
+            List of memory dictionaries with their text and metadata
+        """
+        # Check cache first for identical queries to improve performance
+        cache_key = f"{query}_{category}_{conversation_id}_{min_importance}_{top_k}"
+        if hasattr(self, '_memory_cache') and cache_key in self._memory_cache:
+            # Update access time for cached memories
+            for memory_id in [m['id'] for m in self._memory_cache[cache_key]]:
+                with self.driver.session() as session:
+                    session.execute_write(self._update_memory_access_tx, memory_id)
+            return self._memory_cache[cache_key]
+        
+        # Build where clause for filtering
+        where_clause = self._build_where_clause(category, conversation_id, min_importance)
+        
+        # Get related memories using vector similarity and graph relationships
+        with self.driver.session() as session:
+            memories = session.execute_read(self._get_related_memories_tx, query, where_clause, top_k)
+            
+        # Update access time for retrieved memories
+        for memory_id in [m['id'] for m in memories]:
             with self.driver.session() as session:
-                memories = session.execute_read(
-                    self._get_related_memories_tx,
-                    query=query,
-                    where_clause=where_clause,
-                    top_k=top_k
-                )
-                
-                if memories:
-                    # Update access timestamps
-                    session.execute_write(
-                        self._update_memory_access_tx,
-                        [m["id"] for m in memories]
-                    )
-                    
-                    # Add context to returned memories
-                    for memory in memories:
-                        context = session.execute_read(
-                            self._get_memory_context,
-                            memory["id"]
-                        )
-                        memory["context"] = context
-                        # Format relevance score
-                        if "relevance_score" in memory:
-                            memory["relevance"] = round(memory["relevance_score"], 3)
-                
-                return memories
-                
-        except Exception as e:
-            print(f"Error recalling memories: {e}")
-            traceback.print_exc()
-            return []
+                session.execute_write(self._update_memory_access_tx, memory_id)
+        
+        # Update context window with new memories
+        self._update_context_window(memories)
+        
+        # Cache the results for future identical queries
+        if not hasattr(self, '_memory_cache'):
+            self._memory_cache = {}
+        self._memory_cache[cache_key] = memories
+        
+        # Limit cache size to prevent memory leaks
+        if len(self._memory_cache) > 100:  # Arbitrary limit, adjust as needed
+            # Remove oldest cache entries
+            oldest_keys = sorted(self._memory_cache.keys())[:50]
+            for key in oldest_keys:
+                del self._memory_cache[key]
+        
+        return memories
 
     def _get_memory_context(self, tx, memory_id: str) -> Dict:
         """Get related entities and contexts for a memory from Neo4j"""
@@ -616,22 +648,95 @@ class EpisodicMemoryModule:
                 }
 
     async def _extract_entities(self, text: str) -> Dict[str, List[str]]:
-        """Extract entities from text with improved error handling"""
+        """
+        Extract entities from text using a combination of NLP techniques.
+        
+        Args:
+            text: The text to extract entities from
+            
+        Returns:
+            Dictionary of entity types to lists of entity values
+        """
         try:
-            if not text:
-                return {}
-            
+            # Use spaCy for initial entity extraction
             doc = self.nlp(text)
-            entities = {category: set() for category in self.entity_config.keys()}
             
+            # Extract named entities from spaCy
+            entities = {
+                "PERSON": [],
+                "ORG": [],
+                "GPE": [],  # Geopolitical entities (countries, cities)
+                "LOC": [],  # Non-GPE locations
+                "PRODUCT": [],
+                "EVENT": [],
+                "DATE": [],
+                "TIME": [],
+                "CONCEPT": [],  # Custom category for abstract concepts
+                "TOPIC": []     # Custom category for discussion topics
+            }
+            
+            # Extract entities from spaCy
             for ent in doc.ents:
-                for category, types in self.entity_config.items():
-                    if ent.label_ in types:
-                        entities[category].add(ent.text.lower())
-                        break
+                if ent.label_ in entities:
+                    # Clean and normalize the entity text
+                    clean_text = ent.text.strip().lower()
+                    if clean_text and clean_text not in entities[ent.label_]:
+                        entities[ent.label_].append(clean_text)
             
-            # Convert sets to lists for JSON serialization
-            return {k: list(v) for k, v in entities.items() if v}
+            # Use LLM to extract additional entities, especially concepts and topics
+            # that might be missed by spaCy
+            if self.llm_provider:
+                prompt = f"""
+                Extract key entities from the following text. Focus on:
+                1. CONCEPTS: Abstract ideas or principles
+                2. TOPICS: Main subjects of discussion
+                3. Any important entities missed by standard NLP
+                
+                Text: "{text}"
+                
+                Format your response as a JSON object with these categories.
+                Example format:
+                {{
+                  "CONCEPTS": ["artificial intelligence", "machine learning"],
+                  "TOPICS": ["data science", "neural networks"],
+                  "PERSON": ["Alan Turing"]
+                }}
+                """
+                
+                try:
+                    llm_response = await self.llm_provider.generate_text(prompt, max_tokens=300)
+                    
+                    # Extract JSON from response using more robust method
+                    import re
+                    import json
+                    
+                    # Try to find JSON object in the response
+                    json_match = re.search(r'\{[\s\S]*\}', llm_response)
+                    if json_match:
+                        json_str = json_match.group(0)
+                        # Clean up common JSON formatting issues
+                        json_str = re.sub(r',\s*\}', '}', json_str)  # Remove trailing commas
+                        json_str = re.sub(r',\s*\]', ']', json_str)  # Remove trailing commas in arrays
+                        
+                        try:
+                            llm_entities = json.loads(json_str)
+                            # Merge LLM-extracted entities with spaCy entities
+                            for entity_type, values in llm_entities.items():
+                                if isinstance(values, list):
+                                    entity_type_upper = entity_type.upper()
+                                    if entity_type_upper in entities:
+                                        for value in values:
+                                            if isinstance(value, str):
+                                                clean_value = value.strip().lower()
+                                                if clean_value and clean_value not in entities[entity_type_upper]:
+                                                    entities[entity_type_upper].append(clean_value)
+                        except json.JSONDecodeError as je:
+                            print(f"Error parsing JSON from LLM response: {je}")
+                except Exception as e:
+                    print(f"Error extracting entities with LLM: {e}")
+            
+            # Remove empty categories and return
+            return {k: v for k, v in entities.items() if v}
             
         except Exception as e:
             print(f"Error in entity extraction: {e}")
@@ -714,56 +819,138 @@ class EpisodicMemoryModule:
             return []
 
     async def cleanup_memories(self):
-        """Cleanup old and duplicate memories with better error handling and logging"""
+        """
+        Clean up the memory store by removing duplicates and low-importance memories.
+        
+        Returns:
+            Tuple of (duplicates_removed, orphaned_entities_removed)
+        """
+        duplicates_removed = 0
+        orphaned_entities_removed = 0
+        
         try:
+            # 1. Find and remove duplicate memories
             with self.driver.session() as session:
-                try:
-                    # First, find and remove exact duplicates
-                    cleanup_query = """
-                    MATCH (m1:Memory)
-                    MATCH (m2:Memory)
-                    WHERE m1.id < m2.id 
-                    AND m1.text = m2.text
-                    AND m1.conversation_id = m2.conversation_id
-                    AND m1.category = m2.category
-                    WITH m2
-                    LIMIT 10
-                    DETACH DELETE m2
-                    RETURN count(*) as cleaned
-                    """
+                # Find potential duplicates using text similarity
+                duplicates = session.execute_read(self._find_duplicate_memories_tx)
+                
+                # Process each set of duplicates
+                for duplicate_set in duplicates:
+                    # Keep the memory with highest importance or most recent if tied
+                    memories_to_keep = duplicate_set[0]
+                    memories_to_remove = duplicate_set[1:]
                     
-                    result = session.run(cleanup_query)
-                    cleaned_count = result.single()["cleaned"]
-                    print(f"\nCleaned up {cleaned_count} duplicate memories")
-                    
-                    # Then, clean up orphaned entities
-                    orphan_cleanup = """
-                    MATCH (e:Entity)
-                    WHERE NOT (e)<-[:CONTAINS]-(:Memory)
-                    WITH e
-                    LIMIT 100
-                    DELETE e
-                    RETURN count(*) as cleaned_entities
-                    """
-                    
-                    entity_result = session.run(orphan_cleanup)
-                    entity_count = entity_result.single()["cleaned_entities"]
-                    print(f"Cleaned up {entity_count} orphaned entities")
-                    
-                    return {
-                        "cleaned_memories": cleaned_count,
-                        "cleaned_entities": entity_count
-                    }
-                    
-                except Exception as e:
-                    print(f"Database error during cleanup: {e}")
-                    traceback.print_exc()
-                    return {"cleaned_memories": 0, "cleaned_entities": 0}
-                    
+                    # Remove the duplicates
+                    for memory_id in memories_to_remove:
+                        session.execute_write(self._remove_memory_tx, memory_id)
+                        duplicates_removed += 1
+                        
+                        # Also remove from vector store
+                        try:
+                            self.collection.delete(ids=[memory_id])
+                        except Exception as e:
+                            print(f"Error removing from vector store: {e}")
+            
+            # 2. Find and remove orphaned entities (entities with no connected memories)
+            with self.driver.session() as session:
+                orphaned = session.execute_read(self._find_orphaned_entities_tx)
+                
+                # Remove orphaned entities
+                for entity_id in orphaned:
+                    session.execute_write(self._remove_entity_tx, entity_id)
+                    orphaned_entities_removed += 1
+            
+            print(f"Cleaned up {duplicates_removed} duplicate memories")
+            print(f"Cleaned up {orphaned_entities_removed} orphaned entities")
+            
+            return duplicates_removed, orphaned_entities_removed
+            
         except Exception as e:
             print(f"Error during memory cleanup: {e}")
-            traceback.print_exc()
-            return {"error": str(e)}
+            return 0, 0
+    
+    def _find_duplicate_memories_tx(self, tx):
+        """Find duplicate memories based on text similarity with APOC fallback"""
+        # Try using APOC for better similarity detection
+        apoc_query = """
+        MATCH (m1:Memory)
+        MATCH (m2:Memory)
+        WHERE m1.id < m2.id  // Avoid comparing the same pair twice
+        AND m1.text IS NOT NULL AND m2.text IS NOT NULL
+        // Calculate Jaccard similarity between memory texts
+        WITH m1, m2, apoc.text.jaroWinklerDistance(m1.text, m2.text) AS similarity
+        WHERE similarity > 0.9  // High similarity threshold
+        // Group by first memory and collect potential duplicates
+        RETURN m1.id AS original, collect(m2.id) AS duplicates
+        """
+        
+        try:
+            # Try APOC first
+            result = tx.run(apoc_query)
+            duplicate_sets = []
+            
+            for record in result:
+                original = record["original"]
+                duplicates = record["duplicates"]
+                if duplicates:
+                    duplicate_sets.append([original] + duplicates)
+                    
+            return duplicate_sets
+            
+        except Exception as e:
+            print(f"APOC similarity function not available, falling back to exact matching: {e}")
+            
+            # Fallback to exact matching if APOC is not available
+            fallback_query = """
+            MATCH (m1:Memory)
+            MATCH (m2:Memory)
+            WHERE m1.id < m2.id 
+            AND m1.text = m2.text
+            AND m1.conversation_id = m2.conversation_id
+            RETURN m1.id AS original, collect(m2.id) AS duplicates
+            """
+            
+            result = tx.run(fallback_query)
+            duplicate_sets = []
+            
+            for record in result:
+                original = record["original"]
+                duplicates = record["duplicates"]
+                if duplicates:
+                    duplicate_sets.append([original] + duplicates)
+                    
+            return duplicate_sets
+    
+    def _remove_memory_tx(self, tx, memory_id):
+        """Remove a memory and its relationships"""
+        query = """
+        MATCH (m:Memory {id: $memory_id})
+        OPTIONAL MATCH (m)-[r]-()
+        DELETE r, m
+        """
+        
+        tx.run(query, memory_id=memory_id)
+    
+    def _find_orphaned_entities_tx(self, tx):
+        """Find entities with no connected memories"""
+        query = """
+        MATCH (e:Entity)
+        WHERE NOT (e)-[:CONTAINS]->(:Memory)
+        RETURN e.id AS entity_id
+        """
+        
+        result = tx.run(query)
+        return [record["entity_id"] for record in result]
+    
+    def _remove_entity_tx(self, tx, entity_id):
+        """Remove an entity and its relationships"""
+        query = """
+        MATCH (e:Entity {id: $entity_id})
+        OPTIONAL MATCH (e)-[r]-()
+        DELETE r, e
+        """
+        
+        tx.run(query, entity_id=entity_id)
 
     # Add destructor for cleanup
     def __del__(self):
@@ -845,6 +1032,87 @@ class EpisodicMemoryModule:
                 RETURN count(m) > 0 as exists
             """, conversation_id=conversation_id)
             return result.single()["exists"]
+
+    async def _calculate_memory_importance(self, text: str, metadata: Dict = None) -> float:
+        """
+        Calculate the importance of a memory based on its content and metadata.
+        
+        Args:
+            text: The memory text
+            metadata: Optional metadata associated with the memory
+            
+        Returns:
+            Importance score between 0 and 1
+        """
+        # Start with base importance from metadata or default
+        base_importance = 0.5
+        if metadata and 'priority' in metadata:
+            priority = metadata['priority']
+            if isinstance(priority, str) and priority in self.config.priority_levels:
+                base_importance = self.config.priority_levels[priority]
+            elif isinstance(priority, (int, float)) and 0 <= priority <= 1:
+                base_importance = priority
+        
+        # Use LLM to assess importance if available
+        if self.llm_provider:
+            try:
+                prompt = f"""
+                On a scale of 0.0 to 1.0, rate the importance of the following information for long-term memory:
+                
+                "{text}"
+                
+                Consider these factors:
+                1. Uniqueness of information
+                2. Potential future relevance
+                3. Emotional significance
+                4. Factual density
+                5. Specificity (specific details vs general statements)
+                
+                Return only a single number between 0.0 and 1.0.
+                """
+                
+                response = await self.llm_provider.generate_text(prompt, max_tokens=10)
+                # Extract the numeric value from the response
+                match = re.search(r'(\d+\.\d+|\d+)', response)
+                if match:
+                    llm_importance = float(match.group(0))
+                    # Ensure the value is between 0 and 1
+                    llm_importance = max(0.0, min(1.0, llm_importance))
+                    
+                    # Combine base importance with LLM assessment
+                    # Weight LLM assessment more heavily (70%)
+                    importance = (0.3 * base_importance) + (0.7 * llm_importance)
+                    return importance
+            except Exception as e:
+                print(f"Error calculating memory importance with LLM: {e}")
+        
+        # If LLM assessment failed or not available, use heuristics
+        
+        # 1. Length factor - longer text might contain more information
+        length_factor = min(len(text) / 500, 1.0)  # Normalize to max of 1.0
+        
+        # 2. Entity density - more entities might indicate more important information
+        entities = {}
+        try:
+            doc = self.nlp(text)
+            entities = {ent.label_: ent.text for ent in doc.ents}
+        except:
+            pass
+        entity_factor = min(len(entities) / 5, 1.0)  # Normalize to max of 1.0
+        
+        # 3. Question factor - text containing questions might be more important
+        question_factor = 0.0
+        if '?' in text:
+            question_factor = 0.2
+        
+        # 4. Recency factor - more recent memories might be more important
+        recency_factor = 0.1  # Default small boost for new memories
+        
+        # Combine factors with base importance
+        importance = base_importance + (0.2 * length_factor) + (0.2 * entity_factor) + question_factor + recency_factor
+        
+        # Ensure the final importance is between 0 and 1
+        return max(0.0, min(1.0, importance))
 
 async def main():
     try:

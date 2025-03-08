@@ -1,0 +1,221 @@
+<div class="p-6 absolute inset-0 overflow-auto">
+    <p class="mb-6 opacity-80">These are the rate limits for your organization</p>
+    <h2 class="text-xl font-medium">Chat Completion</h2>
+    <div class="relative w-full overflow-auto min-w-full max-w-[800px]">
+        <table class="w-full caption-bottom text-sm min-w-full max-w-[800px]">
+            <thead class="[&amp;_tr]:border-b hover:none">
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <th
+                        class="h-12 py-3 pr-2 text-left align-middle text-xs font-medium uppercase tracking-wider [&amp;:has([role=checkbox])]:pr-0 text-gray-500 dark:text-gray-400">
+                        ID</th>
+                    <th
+                        class="h-12 py-3 pr-2 align-middle text-xs font-medium uppercase tracking-wider [&amp;:has([role=checkbox])]:pr-0 text-gray-500 dark:text-gray-400 text-right">
+                        Requests per Minute</th>
+                    <th
+                        class="h-12 py-3 pr-2 align-middle text-xs font-medium uppercase tracking-wider [&amp;:has([role=checkbox])]:pr-0 text-gray-500 dark:text-gray-400 text-right">
+                        Requests per Day</th>
+                    <th
+                        class="h-12 py-3 pr-2 align-middle text-xs font-medium uppercase tracking-wider [&amp;:has([role=checkbox])]:pr-0 text-gray-500 dark:text-gray-400 text-right">
+                        Tokens per Minute</th>
+                    <th
+                        class="h-12 py-3 pr-2 align-middle text-xs font-medium uppercase tracking-wider [&amp;:has([role=checkbox])]:pr-0 text-gray-500 dark:text-gray-400 text-right">
+                        Tokens per Day</th>
+                </tr>
+            </thead>
+            <tbody class="[border-0">
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">deepseek-r1-distill-llama-70b
+                    </td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">1,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">6,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">
+                        <div class="bg-secondary rounded-sm text-[.7em] inline-block px-[3px] py-[0px] opacity-50">(No
+                            limit)</div>
+                    </td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">deepseek-r1-distill-qwen-32b
+                    </td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">1,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">6,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">
+                        <div class="bg-secondary rounded-sm text-[.7em] inline-block px-[3px] py-[0px] opacity-50">(No
+                            limit)</div>
+                    </td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">gemma2-9b-it</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">14,400</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">15,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">500,000</td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">llama-3.1-8b-instant</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">14,400</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">6,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">500,000</td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">llama-3.2-11b-vision-preview
+                    </td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">7,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">7,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">500,000</td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">llama-3.2-1b-preview</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">7,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">7,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">500,000</td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">llama-3.2-3b-preview</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">7,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">7,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">500,000</td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">llama-3.2-90b-vision-preview
+                    </td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">15</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">3,500</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">7,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">250,000</td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">llama-3.3-70b-specdec</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">1,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">6,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">100,000</td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">llama-3.3-70b-versatile</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">1,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">6,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">100,000</td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">llama-guard-3-8b</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">14,400</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">15,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">500,000</td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">llama3-70b-8192</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">14,400</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">6,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">500,000</td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">llama3-8b-8192</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">14,400</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">6,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">500,000</td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">mistral-saba-24b</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">1,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">6,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">500,000</td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">mixtral-8x7b-32768</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">14,400</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">5,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">500,000</td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">qwen-2.5-32b</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">1,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">6,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">
+                        <div class="bg-secondary rounded-sm text-[.7em] inline-block px-[3px] py-[0px] opacity-50">(No
+                            limit)</div>
+                    </td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">qwen-2.5-coder-32b</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">1,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">6,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">
+                        <div class="bg-secondary rounded-sm text-[.7em] inline-block px-[3px] py-[0px] opacity-50">(No
+                            limit)</div>
+                    </td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">qwen-qwq-32b</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">30</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">1,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">6,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">
+                        <div class="bg-secondary rounded-sm text-[.7em] inline-block px-[3px] py-[0px] opacity-50">(No
+                            limit)</div>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    <h2 class="text-xl font-medium pt-8">Speech To Text</h2>
+    <div class="relative w-full overflow-auto min-w-full max-w-[800px]">
+        <table class="w-full caption-bottom text-sm min-w-full max-w-[800px]">
+            <thead class="[&amp;_tr]:border-b hover:none">
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <th
+                        class="h-12 py-3 pr-2 text-left align-middle text-xs font-medium uppercase tracking-wider [&amp;:has([role=checkbox])]:pr-0 text-gray-500 dark:text-gray-400">
+                        ID</th>
+                    <th
+                        class="h-12 py-3 pr-2 align-middle text-xs font-medium uppercase tracking-wider [&amp;:has([role=checkbox])]:pr-0 text-gray-500 dark:text-gray-400 text-right">
+                        Requests per Minute</th>
+                    <th
+                        class="h-12 py-3 pr-2 align-middle text-xs font-medium uppercase tracking-wider [&amp;:has([role=checkbox])]:pr-0 text-gray-500 dark:text-gray-400 text-right">
+                        Requests per Day</th>
+                    <th
+                        class="h-12 py-3 pr-2 align-middle text-xs font-medium uppercase tracking-wider [&amp;:has([role=checkbox])]:pr-0 text-gray-500 dark:text-gray-400 text-right">
+                        Audio Seconds per Hour</th>
+                    <th
+                        class="h-12 py-3 pr-2 align-middle text-xs font-medium uppercase tracking-wider [&amp;:has([role=checkbox])]:pr-0 text-gray-500 dark:text-gray-400 text-right">
+                        Audio Seconds per Day</th>
+                </tr>
+            </thead>
+            <tbody class="[border-0">
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">distil-whisper-large-v3-en</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">20</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">2,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">7,200</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">28,800</td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">whisper-large-v3</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">20</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">2,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">7,200</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">28,800</td>
+                </tr>
+                <tr class="border-b border-nav transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted">
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0">whisper-large-v3-turbo</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">20</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">2,000</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">7,200</td>
+                    <td class="py-2 pr-2 align-middle [&amp;:has([role=checkbox])]:pr-0 text-right">28,800</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>

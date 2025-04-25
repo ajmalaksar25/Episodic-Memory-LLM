@@ -40,3 +40,6 @@ visualizations/
 # OS specific files
 .DS_Store
 Thumbs.db
+
+# Temp Files (Names just to prevent clutter and unnecessary files)
+plots_viz.py

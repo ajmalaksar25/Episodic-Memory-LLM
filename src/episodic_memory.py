@@ -3,6 +3,7 @@ import os
 import sys
 import uuid
 import json
+import time
 import asyncio
 import chromadb
 import traceback
@@ -15,10 +16,11 @@ import matplotlib.pyplot as plt
 from neo4j import GraphDatabase
 from llm_providers import GroqProvider
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from chromadb.utils import embedding_functions
 from typing import List, Dict, Optional, Union, Any
 import math
+import random
 
 # Load environment variables
 load_dotenv()
@@ -69,8 +71,23 @@ class EpisodicMemoryModule:
         entity_config: Optional[Dict] = None,
         uri: str = "bolt://localhost:7687",
         user: str = "neo4j",
-        password: str = "password"
+        password: str = "password",
+        min_delay: float = 2.0,
+        max_delay: float = 30.0,
+        max_retries: int = 3
     ):
+        # Initialize maintenance_tasks as an empty list to ensure it always exists
+        self.maintenance_tasks = []
+        
+        # Store rate limiting parameters
+        self.min_delay = min_delay
+        self.max_delay = max_delay
+        self.max_retries = max_retries
+        
+        # Neo4j rate limit tracking
+        self.neo4j_remaining_queries = 1000
+        self.neo4j_reset_time = time.time() + 3600
+        
         # Memory configuration
         self.config = config or MemoryConfig()
         
@@ -91,56 +108,90 @@ class EpisodicMemoryModule:
             r"(?i)(python|java|javascript|c\+\+|ruby|golang|rust|sql|html|css|php)",
             r"(?i)(docker|kubernetes|aws|azure|git|linux|unix|windows|mac)",
         ]
-
-        # Initialize vector store
-        self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
-        self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=embedding_model
-        )
         
-        # Initialize or get collection
+        # Set the LLM provider
+        self.llm = llm_provider
+        
+        # Initialize ChromaDB
         try:
-            self.collection = self.chroma_client.get_collection(
-                name=collection_name,
-                embedding_function=self.embedding_function
+            self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
+            self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name=embedding_model
             )
-        except ValueError:
-            self.collection = self.chroma_client.create_collection(
-                name=collection_name,
-                embedding_function=self.embedding_function
-            )
+            
+            # Initialize or get collection
+            try:
+                self.collection = self.chroma_client.get_collection(
+                    name=collection_name,
+                    embedding_function=self.embedding_function
+                )
+            except ValueError:
+                self.collection = self.chroma_client.create_collection(
+                    name=collection_name,
+                    embedding_function=self.embedding_function
+                )
+            
+            # Set memory_collection alias for the collection
+            self.memory_collection = self.collection
+            
+            # Initialize common English stopwords
+            self.stopwords = {
+                "a", "an", "the", "and", "or", "but", "if", "because", "as", "what",
+                "when", "where", "how", "who", "which", "this", "that", "these", "those",
+                "then", "just", "so", "than", "such", "both", "through", "about", "for",
+                "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+                "do", "does", "did", "to", "from", "by", "on", "at", "in", "with", "of"
+            }
+            
+            try:
+                # Try to import NLTK stopwords if available for a more comprehensive list
+                import nltk
+                from nltk.corpus import stopwords
+                nltk.download('stopwords', quiet=True)
+                self.stopwords = set(stopwords.words('english'))
+            except (ImportError, LookupError):
+                # Keep the default stopwords if NLTK is not available
+                pass
+            
+            # Neo4j initialization
+            try:
+                self.driver = GraphDatabase.driver(uri, auth=(user, password))
+                # Test connection
+                with self.driver.session() as session:
+                    session.run("RETURN 1")
+            except Exception as e:
+                raise ConnectionError(f"Failed to connect to Neo4j: {e}")
+            
+            # Initialize Neo4j schema on startup
+            self._init_neo4j_schema()
+            
+            # Other settings
+            self.context_window = []
 
-        # Neo4j initialization
-        try:
-            self.driver = GraphDatabase.driver(uri, auth=(user, password))
-            # Test connection
-            with self.driver.session() as session:
-                session.run("RETURN 1")
+            self._lock = Lock()
+
+            # Add spaCy initialization
+            try:
+                import spacy
+                self.nlp = spacy.load("en_core_web_sm")
+            except:
+                import en_core_web_sm
+                self.nlp = en_core_web_sm.load()
+
+            # Start memory maintenance tasks
+            try:
+                self.maintenance_tasks = [
+                    asyncio.create_task(self._run_periodic_decay()),
+                    asyncio.create_task(self._run_periodic_cleanup())
+                ]
+            except Exception as e:
+                print(f"Warning: Could not initialize maintenance tasks: {e}")
+                # Ensure maintenance_tasks is at least an empty list
+                self.maintenance_tasks = []
+
         except Exception as e:
-            raise ConnectionError(f"Failed to connect to Neo4j: {e}")
-        
-        # Initialize Neo4j schema on startup
-        self._init_neo4j_schema()
-        
-        # Other settings
-        self.llm_provider = llm_provider
-        self.context_window = []
-
-        self._lock = Lock()
-
-        # Add spaCy initialization
-        try:
-            import spacy
-            self.nlp = spacy.load("en_core_web_sm")
-        except:
-            import en_core_web_sm
-            self.nlp = en_core_web_sm.load()
-
-        # Start memory maintenance tasks
-        self.maintenance_tasks = [
-            asyncio.create_task(self._run_periodic_decay()),
-            asyncio.create_task(self._run_periodic_cleanup())
-        ]
+            print(f"Error initializing ChromaDB: {e}")
+            raise
 
     def _init_neo4j_schema(self):
         """Initialize Neo4j schema with consistent relationship types and constraints"""
@@ -214,7 +265,8 @@ class EpisodicMemoryModule:
         category: $category,
             conversation_id: $conversation_id,
         references: 0,
-        last_accessed: $timestamp
+        last_accessed: $timestamp,
+        metadata: $metadata
         })
         RETURN m
         """
@@ -225,6 +277,9 @@ class EpisodicMemoryModule:
         category = metadata.get("category", "general")
         conversation_id = metadata.get("conversation_id", "default")
         
+        # Serialize metadata to JSON string to avoid Neo4j type errors
+        metadata_json = json.dumps(metadata)
+        
         # Create memory node
         tx.run(
             memory_query,
@@ -233,7 +288,8 @@ class EpisodicMemoryModule:
             timestamp=timestamp,
             importance=importance,
             category=category,
-            conversation_id=conversation_id
+            conversation_id=conversation_id,
+            metadata=metadata_json
         )
         
         # Process entities
@@ -381,7 +437,7 @@ class EpisodicMemoryModule:
         top_k: int = 5
     ) -> List[Dict]:
         """
-        Recall memories related to a query, with optional filtering by category and conversation.
+        Recall memories related to a query with optimized performance and relevance.
         
         Args:
             query: The query to search for related memories
@@ -393,43 +449,144 @@ class EpisodicMemoryModule:
         Returns:
             List of memory dictionaries with their text and metadata
         """
+        if not query or not query.strip():
+            return []
+        
         # Check cache first for identical queries to improve performance
         cache_key = f"{query}_{category}_{conversation_id}_{min_importance}_{top_k}"
         if hasattr(self, '_memory_cache') and cache_key in self._memory_cache:
-            # Update access time for cached memories
-            for memory_id in [m['id'] for m in self._memory_cache[cache_key]]:
-                with self.driver.session() as session:
-                    session.execute_write(self._update_memory_access_tx, memory_id)
+            # Update access time for cached memories using robust query execution
+            try:
+                memory_ids = [m['id'] for m in self._memory_cache[cache_key]]
+                if memory_ids:
+                    def update_access_times(session, memory_ids):
+                        for memory_id in memory_ids:
+                            session.execute_write(self._update_memory_access_tx, memory_id)
+                        return True
+                        
+                    await self._execute_neo4j_query_with_retry(update_access_times, memory_ids)
+            except Exception as e:
+                print(f"Warning: Failed to update memory access times: {e}")
+                
             return self._memory_cache[cache_key]
         
-        # Build where clause for filtering
-        where_clause = self._build_where_clause(category, conversation_id, min_importance)
-            
-        # Get related memories using vector similarity and graph relationships
-        with self.driver.session() as session:
-            memories = session.execute_read(self._get_related_memories_tx, query, where_clause, top_k)
-            
-        # Update access time for retrieved memories
-        for memory_id in [m['id'] for m in memories]:
-            with self.driver.session() as session:
-                session.execute_write(self._update_memory_access_tx, memory_id)
-        
-        # Update context window with new memories
-        self._update_context_window(memories)
-        
-        # Cache the results for future identical queries
+        # Initialize memory cache if needed
         if not hasattr(self, '_memory_cache'):
             self._memory_cache = {}
-        self._memory_cache[cache_key] = memories
         
-        # Limit cache size to prevent memory leaks
-        if len(self._memory_cache) > 100:  # Arbitrary limit, adjust as needed
-            # Remove oldest cache entries
-            oldest_keys = sorted(self._memory_cache.keys())[:50]
-            for key in oldest_keys:
-                del self._memory_cache[key]
-        
-        return memories
+        try:
+            # Build where clause for filtering
+            where_clause = self._build_where_clause(category, conversation_id, min_importance)
+            
+            # Extract keywords from the query for better context matching
+            keywords, entity_names, is_question = self._analyze_query(query)
+            
+            # Empty results as default
+            memories = []
+            
+            # Collect memories from multiple sources
+            try:
+                # 1. Vector search for semantic similarity
+                vector_memories = await self._get_vector_memories(query, where_clause, top_k * 3)
+                
+                # 2. Keyword-based search for explicit mentions
+                def get_keyword_memories(session, keywords, where_clause, top_k):
+                    return session.execute_read(
+                        self._get_keyword_memories_tx, 
+                        keywords, 
+                        where_clause, 
+                        top_k * 2
+                    )
+                    
+                keyword_memories = await self._execute_neo4j_query_with_retry(
+                    get_keyword_memories,
+                    keywords,
+                    where_clause,
+                    top_k * 2
+                )
+                
+                # 3. Entity-based search if entities were detected in the query
+                entity_memories = []
+                if entity_names:
+                    def get_entity_memories(session, entity_names, where_clause, top_k):
+                        return session.execute_read(
+                            self._get_entity_related_memories_tx, 
+                            entity_names, 
+                            where_clause, 
+                            top_k * 2
+                        )
+                        
+                    entity_memories = await self._execute_neo4j_query_with_retry(
+                        get_entity_memories,
+                        entity_names,
+                        where_clause,
+                        top_k * 2
+                    )
+                
+                # Combine memories from different sources with de-duplication
+                combined_memories = {}
+                
+                for memory in vector_memories:
+                    memory_id = memory.get("id")
+                    if memory_id:
+                        memory["source"] = "vector"
+                        memory["vector_score"] = memory.get("score", 0)
+                        combined_memories[memory_id] = memory
+                
+                for memory in keyword_memories:
+                    memory_id = memory.get("id")
+                    if memory_id and memory_id in combined_memories:
+                        combined_memories[memory_id]["keyword_match"] = True
+                        combined_memories[memory_id]["source"] = combined_memories[memory_id].get("source", "") + "+keyword"
+                    elif memory_id:
+                        memory["source"] = "keyword"
+                        memory["keyword_match"] = True
+                        combined_memories[memory_id] = memory
+                
+                for memory in entity_memories:
+                    memory_id = memory.get("id")
+                    if memory_id and memory_id in combined_memories:
+                        combined_memories[memory_id]["entity_match"] = True
+                        combined_memories[memory_id]["entity_score"] = memory.get("score", 0)
+                        combined_memories[memory_id]["source"] = combined_memories[memory_id].get("source", "") + "+entity"
+                    elif memory_id:
+                        memory["source"] = "entity"
+                        memory["entity_match"] = True
+                        memory["entity_score"] = memory.get("score", 0)
+                        combined_memories[memory_id] = memory
+                
+                # Convert back to list
+                memories = list(combined_memories.values())
+                
+            except Exception as e:
+                print(f"Error retrieving memories: {e}")
+                import traceback
+                traceback.print_exc()
+                memories = []
+            
+            # Enhanced scoring - dynamically adjust weights based on query type
+            memories = await self._rank_memories(query, keywords, entity_names, is_question, memories)
+            
+            # Cache the results for future identical queries
+            if not hasattr(self, '_memory_cache'):
+                self._memory_cache = {}
+                
+            self._memory_cache[cache_key] = memories
+            
+            # Limit cache size to prevent memory issues
+            if len(self._memory_cache) > 100:
+                # Remove random entries to keep cache size reasonable
+                keys_to_remove = random.sample(list(self._memory_cache.keys()), min(50, len(self._memory_cache)))
+                for key in keys_to_remove:
+                    del self._memory_cache[key]
+            
+            return memories
+            
+        except Exception as e:
+            print(f"Error recalling memories: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
 
     def _get_memory_context(self, tx, memory_id: str) -> Dict:
         """Get related entities and contexts for a memory from Neo4j"""
@@ -526,18 +683,7 @@ class EpisodicMemoryModule:
             return {}
         
     def _get_related_memories_tx(self, tx, query: str, where_clause: Dict, top_k: int = 5) -> List[Dict]:
-        """
-        Get memories related to a query with optimized performance for large memory stores.
-        
-        Args:
-            tx: Neo4j transaction
-            query: The search query
-            where_clause: Filtering conditions
-            top_k: Maximum number of memories to return
-            
-        Returns:
-            List of memory dictionaries
-        """
+        """Get memories related to a query from Neo4j, applying where clause filters"""
         # Get vector embedding for the query
         query_embedding = self.embedding_function([query])[0]
         
@@ -575,7 +721,7 @@ class EpisodicMemoryModule:
             
             # Get memory details from Neo4j
             query = """
-        MATCH (m:Memory)
+            MATCH (m:Memory)
             WHERE m.id IN $memory_ids
             """
             
@@ -590,26 +736,244 @@ class EpisodicMemoryModule:
             query += """
             RETURN m.id AS id, m.text AS text, m.importance AS importance, 
                    m.timestamp AS timestamp, m.category AS category
-        """
-        
-        params = {
+            """
+            
+            params = {
                 "memory_ids": batch_ids,
                 **where_clause
             }
             
-        result = tx.run(query, params)
-        batch_memories = [dict(record) for record in result]
-        
-        # Add relevance scores
-        for memory in batch_memories:
-            memory["relevance_score"] = memory_id_relevance.get(memory["id"], 0)
-            memory["relevance"] = round(memory["relevance_score"], 3)
-        
-        all_memories.extend(batch_memories)
+            result = tx.run(query, params)
+            batch_memories = [dict(record) for record in result]
+            
+            # Add relevance scores
+            for memory in batch_memories:
+                memory["relevance_score"] = memory_id_relevance.get(memory["id"], 0)
+                memory["relevance"] = round(memory["relevance_score"], 3)
+            
+            all_memories.extend(batch_memories)
         
         # Sort by relevance and limit to top_k
         all_memories.sort(key=lambda x: x["relevance_score"], reverse=True)
         return all_memories[:top_k]
+
+    def _get_keyword_memories_tx(self, tx, keywords, where_clause, top_k=5):
+        """
+        Retrieve memories based on keyword matching
+        
+        Args:
+            tx: Neo4j transaction
+            keywords: Set of keywords to match
+            where_clause: Additional filtering conditions
+            top_k: Maximum number of results to return
+            
+        Returns:
+            List of memory dictionaries with matched keywords
+        """
+        # Prepare a LIKE clause for each keyword
+        keyword_clauses = []
+        params = where_clause.copy()
+        
+        for i, keyword in enumerate(keywords):
+            param_name = f"keyword_{i}"
+            keyword_clauses.append(f"m.text CONTAINS ${param_name}")
+            params[param_name] = keyword
+        
+        # If we have no keywords, return empty
+        if not keyword_clauses:
+            return []
+        
+        # Build the where conditions from the where_clause dict
+        conditions = []
+        for key, value in where_clause.items():
+            if key.startswith("keyword_"):
+                continue  # Skip keyword parameters
+            
+            if isinstance(value, list):
+                conditions.append(f"m.{key} IN ${key}")
+            else:
+                conditions.append(f"m.{key} = ${key}")
+        
+        # Add importance threshold
+        if "min_importance" in where_clause:
+            conditions.append(f"m.importance >= $min_importance")
+        
+        # Add the keyword conditions with OR between them
+        keyword_condition = " OR ".join(keyword_clauses)
+        conditions.append(f"({keyword_condition})")
+        
+        # Build the full where clause
+        where_condition = " AND ".join(conditions)
+        
+        # Construct the Cypher query
+        query = f"""
+        MATCH (m:Memory)
+        WHERE {where_condition}
+        RETURN m.id as id, m.text as text, m.importance as importance, 
+               m.category as category, m.timestamp as timestamp,
+               m.metadata as metadata, m.references as references
+        ORDER BY m.importance DESC, m.timestamp DESC
+        LIMIT {top_k}
+        """
+        
+        # Execute the query
+        result = tx.run(query, **params)
+        
+        # Process and return the results
+        memories = []
+        for record in result:
+            # Convert Neo4j record to dict
+            memory = dict(record)
+            
+            # Deserialize metadata from JSON string if needed
+            if "metadata" in memory and isinstance(memory["metadata"], str):
+                try:
+                    memory["metadata"] = json.loads(memory["metadata"])
+                except (json.JSONDecodeError, TypeError):
+                    memory["metadata"] = {}
+            
+            # Convert timestamp from string to datetime if needed
+            if isinstance(memory.get("timestamp"), str):
+                try:
+                    memory["timestamp"] = datetime.fromisoformat(memory["timestamp"].replace('Z', '+00:00'))
+                except (ValueError, AttributeError):
+                    # If conversion fails, keep the original
+                    pass
+                
+            # Handle case where metadata is missing or null in database
+            if "metadata" not in memory or memory["metadata"] is None:
+                memory["metadata"] = {}
+                
+            memories.append(memory)
+        
+        return memories
+
+    def _get_entity_related_memories_tx(self, tx, entity_names, where_clause, top_k=5):
+        """
+        Retrieve memories related to specific entities through graph relationships
+        
+        Args:
+            tx: Neo4j transaction
+            entity_names: List of entity names to match
+            where_clause: Additional filtering conditions
+            top_k: Maximum number of results to return
+            
+        Returns:
+            List of memory dictionaries related to the entities
+        """
+        # Prepare parameters
+        params = where_clause.copy()
+        params["entity_names"] = entity_names
+        
+        # Build the where conditions from the where_clause dict
+        conditions = []
+        for key, value in where_clause.items():
+            if key == "entity_names":
+                continue  # Skip entity names parameter
+                
+            if isinstance(value, list):
+                conditions.append(f"m.{key} IN ${key}")
+            else:
+                conditions.append(f"m.{key} = ${key}")
+        
+        # Add importance threshold
+        if "min_importance" in where_clause:
+            conditions.append(f"m.importance >= $min_importance")
+        
+        # Combine entity name condition with other conditions
+        combined_conditions = ["e.name IN $entity_names"]
+        combined_conditions.extend(conditions)
+        
+        # Build the full where clause 
+        where_condition = "WHERE " + " AND ".join(combined_conditions)
+        
+        # Construct the Cypher query to find memories connected to the entities
+        query = f"""
+        MATCH (m:Memory)-[r:CONTAINS]->(e:Entity)
+        {where_condition}
+        WITH m, count(e) as entity_matches
+        RETURN m.id as id, m.text as text, m.importance as importance, 
+               m.category as category, m.timestamp as timestamp,
+               m.metadata as metadata, m.references as references,
+               entity_matches as score
+        ORDER BY entity_matches DESC, m.importance DESC
+        LIMIT {top_k}
+        """
+        
+        # Execute the query
+        result = tx.run(query, **params)
+        
+        # Process and return the results
+        memories = []
+        for record in result:
+            # Convert Neo4j record to dict
+            memory = dict(record)
+            
+            # Deserialize metadata from JSON string if needed
+            if "metadata" in memory and isinstance(memory["metadata"], str):
+                try:
+                    memory["metadata"] = json.loads(memory["metadata"])
+                except (json.JSONDecodeError, TypeError):
+                    memory["metadata"] = {}
+            
+            # Normalize the score to 0-1 range
+            if "score" in memory:
+                memory["score"] = min(1.0, memory["score"] / len(entity_names))
+            
+            # Convert timestamp from string to datetime if needed
+            if isinstance(memory.get("timestamp"), str):
+                try:
+                    memory["timestamp"] = datetime.fromisoformat(memory["timestamp"].replace('Z', '+00:00'))
+                except (ValueError, AttributeError):
+                    # If conversion fails, keep the original
+                    pass
+                
+            memories.append(memory)
+        
+        return memories
+
+    def _get_memory_with_context_tx(self, tx, memory_id):
+        """Get a memory with its connected entities and related metadata"""
+        query = """
+        MATCH (m:Memory {id: $memory_id})
+        OPTIONAL MATCH (m)-[r:CONTAINS]->(e:Entity)
+        RETURN m.id as id, m.text as text, m.importance as importance, 
+               m.category as category, m.timestamp as timestamp,
+               m.metadata as metadata, m.references as references,
+               collect(e.name) as entities
+        """
+        
+        record = tx.run(query, memory_id=memory_id).single()
+        if not record:
+            return None
+            
+        # Convert Neo4j record to dict
+        memory = dict(record)
+        
+        # Handle case where metadata is missing or null in database
+        if "metadata" not in memory or memory["metadata"] is None:
+            memory["metadata"] = {}
+        else:
+            # Deserialize metadata from JSON string if it's stored as a string
+            try:
+                if isinstance(memory["metadata"], str):
+                    memory["metadata"] = json.loads(memory["metadata"])
+            except (json.JSONDecodeError, TypeError):
+                # If deserialization fails, keep as is or use empty dict
+                memory["metadata"] = {}
+            
+        # Ensure entities is at least an empty list
+        if "entities" not in memory or memory["entities"] is None:
+            memory["entities"] = []
+            
+        # Convert Neo4j timestamp to Python datetime if needed
+        if "timestamp" in memory and isinstance(memory["timestamp"], str):
+            try:
+                memory["timestamp"] = datetime.fromisoformat(memory["timestamp"].replace('Z', '+00:00'))
+            except (ValueError, TypeError):
+                memory["timestamp"] = datetime.now()
+        
+        return memory
 
     async def _check_memory_decay(self):
         """
@@ -841,7 +1205,7 @@ class EpisodicMemoryModule:
 
     async def _extract_entities(self, text: str) -> Dict[str, List[str]]:
         """
-        Extract entities from text using a combination of NLP techniques with robust JSON parsing.
+        Extract entities from text using a combination of NLP techniques with optimized performance.
         
         Args:
             text: The text to extract entities from
@@ -850,195 +1214,302 @@ class EpisodicMemoryModule:
             Dictionary of entity types to lists of entity values
         """
         try:
-            # Use spaCy for initial entity extraction
+            # Cache check - use simple hash of input text for cache key
+            cache_key = hash(text)
+            if hasattr(self, '_entity_cache') and cache_key in self._entity_cache:
+                return self._entity_cache[cache_key]
+            
+            # Initialize entity cache if needed
+            if not hasattr(self, '_entity_cache'):
+                self._entity_cache = {}
+                
+            # Use spaCy for initial entity extraction (faster pipeline)
             doc = self.nlp(text)
             
-            # Extract named entities from spaCy
-            entities = {
-                "PERSON": [],
-                "ORG": [],
-                "GPE": [],  # Geopolitical entities (countries, cities)
-                "LOC": [],  # Non-GPE locations
-                "PRODUCT": [],
-                "EVENT": [],
-                "DATE": [],
-                "TIME": [],
-                "CONCEPT": [],  # Custom category for abstract concepts
-                "TOPIC": []     # Custom category for discussion topics
-            }
+            # Process in a single pass for better efficiency
+            entities = {}
             
-            # Extract entities from spaCy
+            # Map for quick entity category lookup
+            category_map = {}
+            for category, labels in self.entity_config.items():
+                for label in labels:
+                    category_map[label] = category
+            
+            # Process spaCy entities directly into the correct categories
             for ent in doc.ents:
-                if ent.label_ in entities:
-                    # Clean and normalize the entity text
-                    clean_text = ent.text.strip().lower()
-                    if clean_text and clean_text not in entities[ent.label_]:
-                        entities[ent.label_].append(clean_text)
-            
-            # Use LLM to extract additional entities, especially concepts and topics
-            # that might be missed by spaCy
-            if self.llm_provider:
-                # Define a list of prompt templates with increasing structure
-                prompt_templates = [
-                    # Template 1: Simple JSON request
-                    """
-                    Extract key entities from the following text. Focus on:
-                    1. CONCEPTS: Abstract ideas or principles
-                    2. TOPICS: Main subjects of discussion
-                    3. Any important entities missed by standard NLP
-                    
-                    Text: "{text}"
-                    
-                    Format your response as a JSON object with these categories.
-                    Example format:
-                    {{
-                      "CONCEPTS": ["artificial intelligence", "machine learning"],
-                      "TOPICS": ["data science", "neural networks"],
-                      "PERSON": ["Alan Turing"]
-                    }}
-                    """,
-                    
-                    # Template 2: More structured with explicit instructions
-                    """
-                    Your task is to extract entities from the text below and return ONLY a valid JSON object.
-                    
-                    Text: "{text}"
-                    
-                    Return a JSON object with these exact keys (include only if entities are found):
-                    - PERSON: list of people mentioned
-                    - ORG: list of organizations mentioned
-                    - GPE: list of countries, cities, states mentioned
-                    - LOC: list of locations mentioned
-                    - PRODUCT: list of products mentioned
-                    - EVENT: list of events mentioned
-                    - DATE: list of dates mentioned
-                    - TIME: list of times mentioned
-                    - CONCEPT: list of abstract concepts mentioned
-                    - TOPIC: list of main topics discussed
-                    
-                    Example of valid response:
-                    {{
-                      "PERSON": ["John Smith"],
-                      "CONCEPT": ["artificial intelligence"],
-                      "TOPIC": ["machine learning"]
-                    }}
-                    
-                    IMPORTANT: Return ONLY the JSON object, nothing else.
-                    """,
-                    
-                    # Template 3: Extremely structured with field-by-field extraction
-                    """
-                    Extract entities from this text: "{text}"
-                    
-                    For each category below, list entities as comma-separated values, or write "none" if none found:
-                    
-                    PERSON: 
-                    ORG: 
-                    GPE: 
-                    LOC: 
-                    PRODUCT: 
-                    EVENT: 
-                    DATE: 
-                    TIME: 
-                    CONCEPT: 
-                    TOPIC: 
-                    """
-                ]
+                # Map to our category or use original label
+                category = category_map.get(ent.label_, ent.label_)
                 
-                # Try each prompt template until successful
-                llm_entities = {}
-                for i, template in enumerate(prompt_templates):
-                    try:
-                        prompt = template.format(text=text)
-                        llm_response = await self.llm_provider.generate_text(prompt, max_tokens=400)
-                        
-                        # For the third template, parse the structured format
-                        if i == 2:
-                            # Parse line by line format
-                            parsed_entities = {}
-                            lines = llm_response.strip().split('\n')
-                            for line in lines:
-                                if ':' in line:
-                                    category, values = line.split(':', 1)
-                                    category = category.strip().upper()
-                                    if category in entities and values.strip().lower() != "none":
-                                        parsed_entities[category] = [v.strip().lower() for v in values.strip().split(',')]
-                            
-                            if parsed_entities:
-                                llm_entities = parsed_entities
+                if category not in entities:
+                    entities[category] = []
+                    
+                # Clean and normalize text
+                clean_text = ent.text.strip()
+                if clean_text and clean_text.lower() not in [e.lower() for e in entities[category]]:
+                    entities[category].append(clean_text)
+            
+            # Extract named entities specifically - prioritize these for better recall
+            if "PERSON" not in entities:
+                entities["PERSON"] = []
+            if "ORG" not in entities:
+                entities["ORG"] = []
+            if "GPE" not in entities:
+                entities["GPE"] = []
+                
+            # Enhanced pattern matching for common entities like emails, URLs, dates, proper nouns
+            # Email pattern
+            email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+            for match in re.finditer(email_pattern, text):
+                if "EMAIL" not in entities:
+                    entities["EMAIL"] = []
+                email = match.group(0)
+                if email not in entities["EMAIL"]:
+                    entities["EMAIL"].append(email)
+            
+            # URL pattern
+            url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
+            for match in re.finditer(url_pattern, text):
+                if "URL" not in entities:
+                    entities["URL"] = []
+                url = match.group(0)
+                if url not in entities["URL"]:
+                    entities["URL"].append(url)
+            
+            # Date pattern
+            date_pattern = r'\b(?:\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{1,2}\s(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s\d{2,4})\b'
+            for match in re.finditer(date_pattern, text, re.IGNORECASE):
+                if "DATE" not in entities:
+                    entities["DATE"] = []
+                date = match.group(0)
+                if date not in entities["DATE"]:
+                    entities["DATE"].append(date)
+            
+            # Quick pattern matching for technical entities
+            tech_matches = set()
+            for pattern in self.tech_patterns:
+                for match in re.finditer(pattern, text, re.IGNORECASE):
+                    tech_matches.add(match.group(0))
+            
+            if tech_matches:
+                if "TECH" not in entities:
+                    entities["TECH"] = []
+                for match in tech_matches:
+                    if match not in entities["TECH"]:
+                        entities["TECH"].append(match)
+            
+            # Extract capitalized multi-word phrases as potential entities
+            cap_pattern = r'\b(?:[A-Z][a-z]+\s+){1,5}[A-Z][a-z]+\b'
+            for match in re.finditer(cap_pattern, text):
+                phrase = match.group(0)
+                # Check if this phrase is already covered by an existing entity
+                is_covered = False
+                for ent_list in entities.values():
+                    if any(phrase in entity or entity in phrase for entity in ent_list):
+                        is_covered = True
                         break
-                    except Exception as e:
-                        print(f"Attempt {i+1} failed: {e}")
-                        # Continue to the next template if this one failed
                 
-                # Merge LLM-extracted entities with spaCy entities
-                for entity_type, values in llm_entities.items():
-                    if isinstance(values, list):
-                        entity_type_upper = entity_type.upper()
-                        if entity_type_upper in entities:
-                            for value in values:
-                                if isinstance(value, str):
-                                    clean_value = value.strip().lower()
-                                    if clean_value and clean_value not in entities[entity_type_upper]:
-                                        entities[entity_type_upper].append(clean_value)
+                if not is_covered:
+                    if "MISC" not in entities:
+                        entities["MISC"] = []
+                    if phrase not in entities["MISC"]:
+                        entities["MISC"].append(phrase)
             
-            # Remove empty categories and return
-            return {k: v for k, v in entities.items() if v}
+            # Cache the result
+            self._entity_cache[cache_key] = entities
             
+            # Limit cache size to prevent memory issues
+            if len(self._entity_cache) > 1000:
+                # Remove 200 random entries
+                keys_to_remove = random.sample(list(self._entity_cache.keys()), min(200, len(self._entity_cache)))
+                for key in keys_to_remove:
+                    del self._entity_cache[key]
+                    
+            return entities
+        
         except Exception as e:
-            print(f"Error in entity extraction: {e}")
+            print(f"Error extracting entities: {e}")
             return {}
 
     def _update_context_window(self, new_memories: List[Dict]):
-        """Update context window with efficient memory management and error handling"""
+        """
+        Update context window with efficient memory management and improved relevance weighing
+        
+        Args:
+            new_memories: List of new memories to consider for the context window
+        """
         try:
             if not isinstance(new_memories, list):
                 raise ValueError("new_memories must be a list")
             
+            # Ensure all memories have required fields to prevent NoneType errors
+            validated_memories = []
+            for memory in new_memories:
+                if not memory:
+                    continue
+                    
+                # Ensure all required fields exist
+                if "id" not in memory or "text" not in memory:
+                    continue
+                    
+                # Ensure metadata is a dictionary
+                if "metadata" not in memory or memory["metadata"] is None:
+                    memory["metadata"] = {}
+                
+                # Ensure other fields have default values if missing
+                memory["importance"] = memory.get("importance", 0.5)
+                memory["category"] = memory.get("category", "general")
+                memory["references"] = memory.get("references", 0)
+                memory["timestamp"] = memory.get("timestamp", datetime.now())
+                memory["last_accessed"] = memory.get("last_accessed", datetime.now())
+                
+                validated_memories.append(memory)
+            
+            # Replace new_memories with validated list
+            new_memories = validated_memories
+            
             current_time = datetime.now()
             
             try:
+                # Stage 1: Process existing context window
                 # Update importance based on decay and time since last access
                 for memory in self.context_window:
                     if "last_accessed" in memory:
+                        # Calculate time-based decay
                         time_diff = (current_time - memory["last_accessed"]).total_seconds() / 3600
-                        decay = max(0.5, self.config.memory_decay_factor ** (time_diff / 24))
-                        memory["importance"] = memory.get("importance", 0.5) * decay
+                        # Use more gradual decay for recently accessed memories
+                        if time_diff < 24:  # Less than a day
+                            decay = max(0.9, self.config.memory_decay_factor ** (time_diff / 72))
+                        else:
+                            decay = max(0.5, self.config.memory_decay_factor ** (time_diff / 24))
+                        
+                        # Apply reference count bonus
+                        reference_bonus = min(0.2, (memory.get("references", 0) * 0.05))
+                        
+                        # Apply decay with reference bonus
+                        memory["importance"] = min(1.0, memory.get("importance", 0.5) * decay + reference_bonus)
                 
-                # Remove duplicates and low importance memories
-                seen_texts = set()
-                filtered_window = []
+                # Stage 2: Prepare combined memory list and deduplicate
+                # Create a combined list of all memories (existing and new)
+                all_memories = self.context_window.copy()
                 
-                for mem in self.context_window:
-                    text_key = mem.get("text", "").strip().lower()
-                    if (mem.get("importance", 0) > self.config.importance_threshold and 
-                        text_key not in seen_texts):
-                        seen_texts.add(text_key)
-                        filtered_window.append(mem)
+                # Create a set of existing memory texts (lowercase for case-insensitive comparison)
+                existing_texts = {memory.get("text", "").strip().lower() for memory in all_memories}
                 
-                # Add new memories
+                # Add new memories, avoiding duplicates
                 for memory in new_memories:
-                    if not isinstance(memory, dict):
+                    if not isinstance(memory, dict) or "text" not in memory:
                         print(f"Skipping invalid memory format: {memory}")
                         continue
                     
                     text_key = memory.get("text", "").strip().lower()
-                    if text_key and text_key not in seen_texts:
-                        seen_texts.add(text_key)
+                    if not text_key:
+                        continue
+                        
+                    # Check for duplicates or near-duplicates
+                    is_duplicate = False
+                    
+                    # Exact duplicate check
+                    if text_key in existing_texts:
+                        is_duplicate = True
+                        # Update existing memory rather than add a new one
+                        for existing_memory in all_memories:
+                            if existing_memory.get("text", "").strip().lower() == text_key:
+                                # Boost importance when a memory is recalled again
+                                existing_memory["importance"] = min(1.0, existing_memory.get("importance", 0.5) + 0.1)
+                                existing_memory["last_accessed"] = current_time
+                                existing_memory["references"] = existing_memory.get("references", 0) + 1
+                                break
+                    
+                    # Add new memory if it's not a duplicate
+                    if not is_duplicate:
                         memory_copy = memory.copy()
                         memory_copy["last_accessed"] = current_time
-                        filtered_window.append(memory_copy)
+                        memory_copy["references"] = memory_copy.get("references", 0)
+                        all_memories.append(memory_copy)
+                        existing_texts.add(text_key)
                 
-                # Sort and limit
+                # Stage 3: Filter and prioritize memories
+                # Calculate a combined score for each memory using multiple factors
+                for memory in all_memories:
+                    # Base importance from memory
+                    base_importance = memory.get("importance", 0.5)
+                    
+                    # Recency factor - boost more recently accessed memories
+                    recency_score = 0.5
+                    if "last_accessed" in memory:
+                        age_hours = (current_time - memory["last_accessed"]).total_seconds() / 3600
+                        recency_score = max(0.1, min(1.0, math.exp(-age_hours / 48)))  # 48-hour half-life
+                    
+                    # Reference count factor - boost more frequently referenced memories
+                    reference_score = 0.5
+                    if "references" in memory:
+                        reference_score = min(1.0, 0.5 + (memory["references"] * 0.1))
+                    
+                    # Relevance factor - if provided from search results
+                    relevance_score = memory.get("final_score", memory.get("score", 0.5))
+                    
+                    # Calculate combined prioritization score with weighted factors
+                    # Heavier weight on relevance and importance
+                    memory["priority_score"] = (
+                        (base_importance * 0.4) +
+                        (recency_score * 0.2) +
+                        (reference_score * 0.15) +
+                        (relevance_score * 0.25)
+                    )
+                
+                # Sort memories by priority score (descending) and limit to max_context_items
                 self.context_window = sorted(
-                    filtered_window,
-                    key=lambda x: (
-                        x.get("importance", 0) * 0.7 + 
-                        (1 - (current_time - x.get("last_accessed", current_time)).total_seconds() / 86400) * 0.3
-                    ),
+                    all_memories,
+                    key=lambda x: x.get("priority_score", 0),
                     reverse=True
                 )[:self.config.max_context_items]
                 
+                # Ensure we have a diverse set of memories by category if possible
+                if len(self.context_window) > 5:
+                    # Count memories by category
+                    category_counts = {}
+                    for memory in self.context_window:
+                        category = memory.get("category", "general")
+                        category_counts[category] = category_counts.get(category, 0) + 1
+                    
+                    # Identify overrepresented categories
+                    avg_count = len(self.context_window) / max(1, len(category_counts))
+                    overrepresented = [cat for cat, count in category_counts.items() 
+                                      if count > avg_count * 1.5 and count > 2]
+                    
+                    # If we have overrepresented categories, replace some with memories from underrepresented ones
+                    if overrepresented and len(all_memories) > len(self.context_window):
+                        # Memories already in the window
+                        selected_ids = {mem.get("id") for mem in self.context_window}
+                        
+                        # Find memories from underrepresented categories
+                        underrepresented_memories = [
+                            mem for mem in all_memories 
+                            if mem.get("id") not in selected_ids and
+                            mem.get("category", "general") not in overrepresented
+                        ]
+                        
+                        # Sort by priority
+                        underrepresented_memories.sort(key=lambda x: x.get("priority_score", 0), reverse=True)
+                        
+                        # Replace some memories from overrepresented categories
+                        for cat in overrepresented:
+                            # Find memories from this category
+                            cat_memories = [mem for mem in self.context_window 
+                                           if mem.get("category", "general") == cat]
+                            
+                            # Keep the top ones, replace others
+                            to_replace = cat_memories[max(1, len(cat_memories) // 2):]
+                            
+                            for i, mem in enumerate(to_replace):
+                                if i < len(underrepresented_memories):
+                                    # Find index in context window
+                                    idx = next((j for j, m in enumerate(self.context_window) 
+                                              if m.get("id") == mem.get("id")), None)
+                                    if idx is not None:
+                                        # Replace with an underrepresented memory
+                                        self.context_window[idx] = underrepresented_memories[i]
+            
             except Exception as e:
                 print(f"Error processing context window: {e}")
                 traceback.print_exc()
@@ -1203,9 +1674,10 @@ class EpisodicMemoryModule:
     def __del__(self):
         """Cleanup on deletion"""
         try:
-            # Cancel maintenance tasks
-            for task in self.maintenance_tasks:
-                task.cancel()
+            # Cancel maintenance tasks if they exist
+            if hasattr(self, 'maintenance_tasks'):
+                for task in self.maintenance_tasks:
+                    task.cancel()
             
             # Close Neo4j connection
             if hasattr(self, 'driver'):
@@ -1282,7 +1754,8 @@ class EpisodicMemoryModule:
 
     async def _calculate_memory_importance(self, text: str, metadata: Dict = None) -> float:
         """
-        Calculate the importance of a memory based on its content and metadata.
+        Calculate the importance of a memory based on its content and metadata using
+        an enhanced algorithm with multiple heuristics.
         
         Args:
             text: The memory text
@@ -1291,6 +1764,9 @@ class EpisodicMemoryModule:
         Returns:
             Importance score between 0 and 1
         """
+        if not text or not text.strip():
+            return 0.3  # Default low importance for empty or blank text
+        
         # Start with base importance from metadata or default
         base_importance = 0.5
         if metadata and 'priority' in metadata:
@@ -1301,389 +1777,152 @@ class EpisodicMemoryModule:
                 base_importance = priority
         
         # Use LLM to assess importance if available
+        llm_importance = None
         if self.llm_provider:
             try:
+                # Enhanced prompt with specific evaluation criteria
                 prompt = f"""
-                On a scale of 0.0 to 1.0, rate the importance of the following information for long-term memory:
+                Rate the importance of the following information for long-term memory storage.
                 
-                "{text}"
+                TEXT: "{text}"
                 
-                Consider these factors:
-                1. Uniqueness of information
-                2. Potential future relevance
-                3. Emotional significance
-                4. Factual density
-                5. Specificity (specific details vs general statements)
+                Use these specific criteria:
+                1. Information density: Does it contain many facts, details, or concepts?
+                2. Uniqueness: How unique or rare is this information?
+                3. Future relevance: How likely is this information to be useful in future conversations?
+                4. Specificity: Does it contain specific details rather than generalities?
+                5. Emotional/Personal significance: Does it contain emotionally relevant or personal details?
                 
-                Return only a single number between 0.0 and 1.0.
+                For each criterion, score from 0.0 to 1.0, then provide a weighted average.
+                
+                Score each of the 5 criteria individually, then calculate a final score.
+                Return ONLY the final numeric score between 0.0 and 1.0, nothing else.
                 """
                 
-                response = await self.llm_provider.generate_text(prompt, max_tokens=10)
+                response = await self.llm_provider.generate_text(prompt, max_tokens=50)
                 # Extract the numeric value from the response
                 match = re.search(r'(\d+\.\d+|\d+)', response)
                 if match:
                     llm_importance = float(match.group(0))
                     # Ensure the value is between 0 and 1
                     llm_importance = max(0.0, min(1.0, llm_importance))
-                    
-                    # Combine base importance with LLM assessment
-                    # Weight LLM assessment more heavily (70%)
-                    importance = (0.3 * base_importance) + (0.7 * llm_importance)
-                    return importance
             except Exception as e:
                 print(f"Error calculating memory importance with LLM: {e}")
         
-        # If LLM assessment failed or not available, use heuristics
+        # Enhanced heuristic scoring when LLM is not available or fails
+        # Create a list of heuristic scores
+        heuristic_scores = []
         
         # 1. Length factor - longer text might contain more information
-        length_factor = min(len(text) / 500, 1.0)  # Normalize to max of 1.0
+        normalized_length = min(len(text) / 500, 1.0)  # Normalize to max of 1.0
+        length_factor = 0.3 + (normalized_length * 0.7)  # Scale between 0.3 and 1.0
+        heuristic_scores.append(length_factor)
         
         # 2. Entity density - more entities might indicate more important information
-        entities = {}
         try:
-            doc = self.nlp(text)
-            entities = {ent.label_: ent.text for ent in doc.ents}
-        except:
-            pass
-        entity_factor = min(len(entities) / 5, 1.0)  # Normalize to max of 1.0
+            # Extract entities
+            entities = {}
+            try:
+                doc = self.nlp(text)
+                entities = {ent.label_: ent.text for ent in doc.ents}
+            except Exception:
+                pass
+            
+            # Calculate normalized entity density
+            entity_count = len(entities)
+            words = text.split()
+            word_count = len(words)
+            
+            if word_count > 0:
+                entity_density = min(entity_count / (word_count / 10), 1.0)  # Expect 1 entity per 10 words
+            else:
+                entity_density = 0.0
+                
+            heuristic_scores.append(entity_density)
+        except Exception:
+            heuristic_scores.append(0.0)
         
-        # 3. Question factor - text containing questions might be more important
+        # 3. Keyword importance - check for important keywords
+        important_keywords = [
+            "remember", "important", "critical", "essential", "key", "vital",
+            "significant", "crucial", "necessary", "remember", "note", "attention",
+            "password", "secret", "confidential", "private", "personal", "security"
+        ]
+        
+        keyword_count = sum(1 for keyword in important_keywords if keyword.lower() in text.lower())
+        keyword_factor = min(keyword_count / 3, 1.0)  # Normalize to max of 1.0
+        heuristic_scores.append(keyword_factor)
+        
+        # 4. Question factor - text containing questions might be more important
         question_factor = 0.0
         if '?' in text:
-            question_factor = 0.2
+            question_count = text.count('?')
+            question_factor = min(question_count / 2, 1.0)  # Normalize to max of 1.0
+        heuristic_scores.append(question_factor)
         
-        # 4. Recency factor - more recent memories might be more important
-        recency_factor = 0.1  # Default small boost for new memories
+        # 5. Number density - text with numbers might contain factual information
+        number_pattern = r'\b\d+\b'
+        numbers = re.findall(number_pattern, text)
+        number_density = min(len(numbers) / 5, 1.0)  # Normalize to max of 1.0
+        heuristic_scores.append(number_density)
         
-        # Combine factors with base importance
-        importance = base_importance + (0.2 * length_factor) + (0.2 * entity_factor) + question_factor + recency_factor
+        # 6. Semantic diversity - text with diverse vocabulary might be more important
+        unique_words = set(word.lower() for word in re.findall(r'\b\w+\b', text))
+        total_words = len(re.findall(r'\b\w+\b', text))
+        if total_words > 0:
+            lexical_diversity = min(len(unique_words) / total_words * 2, 1.0)  # Scale up to favor diversity
+        else:
+            lexical_diversity = 0.0
+        heuristic_scores.append(lexical_diversity)
         
-        # Ensure the final importance is between 0 and 1
+        # 7. Recency factor - more recent memories might be more important (if timestamp available)
+        recency_factor = 0.7  # Default moderate boost for new memories
+        if metadata and 'timestamp' in metadata:
+            try:
+                timestamp = metadata['timestamp']
+                if isinstance(timestamp, str):
+                    timestamp = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                
+                # Calculate hours since creation
+                hours_ago = (datetime.now() - timestamp).total_seconds() / 3600
+                
+                # Decay factor based on recency (stronger in first 24 hours)
+                if hours_ago < 24:
+                    recency_factor = 0.8 - (hours_ago / 120)  # Decay from 0.8 to 0.6 over 24 hours
+                else:
+                    recency_factor = 0.6 - (min((hours_ago - 24) / 240, 0.4))  # Decay from 0.6 to 0.2 over 10 days
+                    
+                recency_factor = max(0.2, min(0.8, recency_factor))  # Constrain between 0.2 and 0.8
+                
+            except (ValueError, TypeError):
+                pass
+        
+        heuristic_scores.append(recency_factor)
+        
+        # Calculate an average of all heuristic scores
+        heuristic_importance = sum(heuristic_scores) / len(heuristic_scores)
+        
+        # Combine LLM assessment with heuristics
+        if llm_importance is not None:
+            # Weight LLM assessment more heavily (70%)
+            importance = (0.3 * heuristic_importance) + (0.7 * llm_importance)
+        else:
+            # Use heuristics combined with base importance
+            importance = (0.4 * base_importance) + (0.6 * heuristic_importance)
+        
+        # Apply category-based importance adjustment
+        if metadata and 'category' in metadata:
+            category = metadata['category']
+            # Boost importance for certain categories
+            if category in ['personal', 'security', 'credentials', 'confidential']:
+                importance = min(1.0, importance * 1.2)
+            # Reduce importance for certain categories
+            elif category in ['general', 'greeting', 'small_talk']:
+                importance = importance * 0.8
+        
+        # Apply final scaling and ensure the value is between 0 and 1
         return max(0.0, min(1.0, importance))
 
-    def _get_conversation_memories_tx(self, tx, conversation_id: str) -> List[Dict]:
-        """
-        Get memories from a specific conversation.
-        
-        Args:
-            tx: Neo4j transaction
-            conversation_id: ID of the conversation to retrieve memories from
-            
-        Returns:
-            List of memory dictionaries
-        """
-        query = """
-        MATCH (m:Memory)
-        WHERE m.conversation_id = $conversation_id
-        RETURN m.id as id,
-               m.text as text,
-               m.importance as importance,
-               m.category as category,
-               m.timestamp as timestamp
-        ORDER BY m.timestamp DESC
-        """
-        result = tx.run(query, conversation_id=conversation_id)
-        return [dict(record) for record in result]
-
-    async def batch_store_memories(self, texts: List[str], metadata_list: List[Dict] = None, conversation_id: str = None) -> List[str]:
-        """
-        Store multiple memories in parallel for improved performance.
-        
-        Args:
-            texts: List of text strings to store as memories
-            metadata_list: Optional list of metadata dictionaries (one per text)
-            conversation_id: Optional conversation ID to associate with all memories
-            
-        Returns:
-            List of memory IDs for the stored memories
-        """
-        if not texts:
-            return []
-            
-        # Ensure metadata_list is the same length as texts
-        if metadata_list is None:
-            metadata_list = [None] * len(texts)
-        elif len(metadata_list) != len(texts):
-            raise ValueError("metadata_list must be the same length as texts")
-            
-        # Process memories in parallel
-        import asyncio
-        
-        # Create tasks for calculating importance and extracting entities
-        importance_tasks = []
-        entity_tasks = []
-        
-        for i, text in enumerate(texts):
-            metadata = metadata_list[i] or {}
-            if conversation_id and "conversation_id" not in metadata:
-                metadata["conversation_id"] = conversation_id
-                
-            # Create task for importance calculation
-            importance_tasks.append(self._calculate_memory_importance(text, metadata))
-            
-            # Create task for entity extraction
-            entity_tasks.append(self._extract_entities(text))
-        
-        # Wait for all tasks to complete
-        importances = await asyncio.gather(*importance_tasks)
-        entities_list = await asyncio.gather(*entity_tasks)
-        
-        # Store memories with calculated importances and extracted entities
-        memory_ids = []
-        
-        for i, text in enumerate(texts):
-            metadata = metadata_list[i] or {}
-            if conversation_id and "conversation_id" not in metadata:
-                metadata["conversation_id"] = conversation_id
-                
-            # Add importance to metadata
-            metadata["importance"] = importances[i]
-            
-            # Generate a unique ID for the memory
-            memory_id = str(uuid.uuid4())
-            
-            # Current timestamp
-            timestamp = datetime.now().isoformat()
-            
-            # Add memory to vector store
-            self.collection.add(
-                documents=[text],
-                metadatas=[{
-                    "id": memory_id,
-                    "timestamp": timestamp,
-                    "importance": importances[i],
-                    **metadata
-                }],
-                ids=[memory_id]
-            )
-            
-            # Store memory in Neo4j with entities
-            with self.driver.session() as session:
-                session.execute_write(
-                    self._create_memory_with_entities,
-                    memory_id=memory_id,
-                    text=text,
-                    metadata={
-                        "timestamp": timestamp,
-                        "importance": importances[i],
-                        **metadata
-                    },
-                    entities=entities_list[i]
-                )
-                
-            memory_ids.append(memory_id)
-            
-        # Update context window with the new memories
-        new_memories = []
-        for i, memory_id in enumerate(memory_ids):
-            new_memories.append({
-                "id": memory_id,
-                "text": texts[i],
-                "timestamp": datetime.now().isoformat(),
-                "importance": importances[i],
-                "metadata": metadata_list[i] or {},
-                "entities": entities_list[i]
-            })
-            
-        self._update_context_window(new_memories)
-            
-        return memory_ids
-        
-    async def batch_recall_memories(self, queries: List[str], category: str = None, conversation_id: str = None, min_importance: float = 0.0, top_k: int = 5) -> List[List[Dict]]:
-        """
-        Recall memories for multiple queries in parallel.
-        
-        Args:
-            queries: List of query strings
-            category: Optional category to filter memories
-            conversation_id: Optional conversation ID to filter memories
-            min_importance: Minimum importance score for memories to be returned
-            top_k: Maximum number of memories to return per query
-            
-        Returns:
-            List of lists of memory dictionaries, one list per query
-        """
-        if not queries:
-            return []
-            
-        # Process queries in parallel
-        import asyncio
-        
-        # Create tasks for recalling memories
-        tasks = []
-        
-        for query in queries:
-            tasks.append(self.recall_memories(query, category, conversation_id, min_importance, top_k))
-            
-        # Wait for all tasks to complete
-        results = await asyncio.gather(*tasks)
-        
-        return results
-
-    def generate_memory_graph_visualization(self, output_file: str = "memory_graph.html", max_nodes: int = 100):
-        """
-        Generate an interactive visualization of the memory graph.
-        
-        Args:
-            output_file: Path to save the HTML visualization
-            max_nodes: Maximum number of nodes to include in the visualization
-            
-        Returns:
-            Path to the generated visualization file
-        """
-        try:
-            import networkx as nx
-            from pyvis.network import Network
-            
-            # Create a NetworkX graph
-            G = nx.Graph()
-            
-            # Query Neo4j for nodes and relationships
-            with self.driver.session() as session:
-                # Get memories
-                memory_query = f"""
-                MATCH (m:Memory)
-                RETURN m.id AS id, m.text AS text, m.importance AS importance, 
-                       m.category AS category, toString(m.timestamp) AS timestamp
-                ORDER BY m.importance DESC
-                LIMIT {max_nodes // 2}
-                """
-                
-                memory_result = session.run(memory_query)
-                memories = [dict(record) for record in memory_result]
-                
-                if not memories:
-                    print("No memories found in the database")
-                    return None
-                
-                # Add memory nodes to graph
-                for memory in memories:
-                    # Truncate text for display
-                    display_text = memory["text"][:50] + "..." if len(memory["text"]) > 50 else memory["text"]
-                    
-                    # Add node with attributes - convert all values to JSON-serializable types
-                    G.add_node(
-                        memory["id"],
-                        label=display_text,
-                        title=memory["text"],  # Full text on hover
-                        group="memory",
-                        importance=float(memory.get("importance", 0.5)),
-                        category=str(memory.get("category", "general")),
-                        timestamp=str(memory.get("timestamp", ""))
-                    )
-                
-                # Get entities
-                entity_query = f"""
-                MATCH (e:Entity)<-[:CONTAINS]-(m:Memory)
-                WHERE m.id IN $memory_ids
-                RETURN e.id AS id, e.value AS value, e.type AS type, 
-                       count(m) AS memory_count
-                ORDER BY memory_count DESC
-                LIMIT {max_nodes // 2}
-                """
-                
-                entity_result = session.run(entity_query, memory_ids=[m["id"] for m in memories])
-                entities = [dict(record) for record in entity_result]
-                
-                if not entities:
-                    print("No entities found related to memories")
-                    # Create a simple graph with just memories
-                    net = Network(height="800px", width="100%", notebook=False, directed=False)
-                    net.from_nx(G)
-                    net.save_graph(output_file)
-                    print(f"Memory graph visualization (memories only) saved to {output_file}")
-                    return output_file
-                
-                # Add entity nodes to graph
-                for entity in entities:
-                    if "id" not in entity or not entity["id"]:
-                        continue  # Skip entities without ID
-                        
-                    # Use value as label if available, otherwise use ID
-                    label = str(entity.get("value", entity["id"]))
-                    if not label:
-                        continue  # Skip entities without label
-                        
-                    G.add_node(
-                        entity["id"],
-                        label=label,
-                        title=f"{entity.get('type', 'Entity')}: {label}",
-                        group=str(entity.get("type", "entity")).lower(),
-                        memory_count=int(entity.get("memory_count", 1))
-                    )
-                
-                # Get relationships between memories and entities
-                rel_query = """
-                MATCH (m:Memory)-[:CONTAINS]->(e:Entity)
-                WHERE m.id IN $memory_ids AND e.id IN $entity_ids
-                RETURN m.id AS memory_id, e.id AS entity_id
-                """
-                
-                rel_result = session.run(
-                    rel_query, 
-                    memory_ids=[m["id"] for m in memories],
-                    entity_ids=[e["id"] for e in entities]
-                )
-                
-                # Add edges to graph
-                for record in rel_result:
-                    if record["memory_id"] and record["entity_id"]:
-                        G.add_edge(record["memory_id"], record["entity_id"])
-            
-            # Create a PyVis network from the NetworkX graph
-            net = Network(height="800px", width="100%", notebook=False, directed=False)
-            
-            # Set physics options for better visualization
-            net.barnes_hut(
-                gravity=-80000,
-                central_gravity=0.3,
-                spring_length=250,
-                spring_strength=0.001,
-                damping=0.09
-            )
-            
-            # Add the graph to the network
-            net.from_nx(G)
-            
-            # Configure node appearance
-            for node in net.nodes:
-                if node.get("group") == "memory":
-                    node["color"] = "#6929c4"  # Purple for memories
-                    node["size"] = 15 + (float(node.get("importance", 0.5)) * 15)  # Size based on importance
-                else:
-                    # Color entities by type
-                    entity_colors = {
-                        "person": "#1192e8",   # Blue
-                        "org": "#005d5d",      # Teal
-                        "gpe": "#9f1853",      # Magenta
-                        "loc": "#fa4d56",      # Red
-                        "product": "#570408",  # Maroon
-                        "event": "#198038",    # Green
-                        "date": "#b28600",     # Yellow
-                        "time": "#8a3800",     # Orange
-                        "concept": "#a56eff",  # Purple
-                        "topic": "#009d9a"     # Cyan
-                    }
-                    
-                    node_group = str(node.get("group", "entity")).lower()
-                    node["color"] = entity_colors.get(node_group, "#6f6f6f")  # Default gray
-                    node["size"] = 10 + (int(node.get("memory_count", 1)) * 2)  # Size based on memory count
-            
-            # Save the visualization
-            net.save_graph(output_file)
-            
-            print(f"Memory graph visualization saved to {output_file}")
-            return output_file
-            
-        except ImportError:
-            print("Error: Required packages not installed. Please install networkx and pyvis.")
-            return None
-        except Exception as e:
-            print(f"Error generating memory graph visualization: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-            
     async def adapt_importance_thresholds(self):
         """
         Adapt importance thresholds based on memory usage patterns.
@@ -1896,6 +2135,60 @@ class EpisodicMemoryModule:
                     
             return {}
 
+    async def _execute_neo4j_query_with_retry(self, query_func, *args, **kwargs):
+        """
+        Execute a Neo4j query with retry logic and rate limiting
+        
+        Args:
+            query_func: Function that executes the Neo4j query
+            *args: Arguments to pass to the query function
+            **kwargs: Keyword arguments to pass to the query function
+            
+        Returns:
+            Result of the query function
+        """
+        attempts = 0
+        backoff_time = self.min_delay
+        last_error = None
+        
+        while attempts < self.max_retries:
+            try:
+                # Check if we're approaching rate limits
+                if self.neo4j_remaining_queries < 10 and time.time() < self.neo4j_reset_time:
+                    wait_time = self.neo4j_reset_time - time.time() + 1
+                    print(f"Neo4j rate limit approaching. Waiting {wait_time:.2f} seconds...")
+                    await asyncio.sleep(wait_time)
+                
+                # Execute the query
+                with self.driver.session() as session:
+                    result = query_func(session, *args, **kwargs)
+                    
+                # Update rate limit tracking (simple estimation)
+                self.neo4j_remaining_queries = max(0, self.neo4j_remaining_queries - 1)
+                
+                return result
+                
+            except Exception as e:
+                last_error = e
+                attempts += 1
+                
+                # Check if this is a rate limiting error
+                if "capacity" in str(e).lower() or "too many" in str(e).lower():
+                    # Aggressive backoff for rate limiting
+                    backoff_time = min(backoff_time * 2, self.max_delay)
+                    self.neo4j_remaining_queries = 0
+                    self.neo4j_reset_time = time.time() + 60  # Assume 1 minute reset
+                else:
+                    # Standard backoff for other errors
+                    backoff_time = min(backoff_time * 1.5, self.max_delay)
+                
+                print(f"Neo4j query attempt {attempts} failed: {e}. Retrying in {backoff_time:.2f} seconds...")
+                await asyncio.sleep(backoff_time)
+        
+        # If we get here, all retry attempts failed
+        print(f"All Neo4j query attempts failed after {self.max_retries} retries: {last_error}")
+        raise last_error
+
 async def main():
     try:
         # Load environment variables
@@ -1982,8 +2275,8 @@ async def main():
                 print(f"\nRelationship {i+1}: {rel['entity1']} <-> {rel['entity2']}")
                 print(f"Shared contexts: {len(rel['shared_contexts'])}")
                 print(f"Example context: {rel['shared_contexts'][0] if rel['shared_contexts'] else 'None'}")
-        else:
-            print("No significant entity relationships found")
+            else:
+                print("No significant entity relationships found")
 
         # 5. Generate memory graph visualization
         print("\n5. Generating memory graph visualization...")

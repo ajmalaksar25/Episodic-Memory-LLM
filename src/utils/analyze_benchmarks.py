@@ -13,25 +13,8 @@ import re
 import pickle
 
 def load_benchmark_data(model_name, output_dir='visualizations'):
-    """Load benchmark data from pickle files if available, otherwise use sample data"""
-    model_dir = os.path.join(output_dir, model_name)
-    pickle_file = os.path.join(model_dir, 'benchmark_data.pkl')
-    
-    if os.path.exists(pickle_file):
-        try:
-            with open(pickle_file, 'rb') as f:
-                return pickle.load(f)
-        except Exception as e:
-            print(f"Error loading benchmark data: {e}")
-    
-    # If pickle file doesn't exist or can't be loaded, extract data from HTML files
-    benchmark_data = extract_data_from_html_files(model_name, output_dir)
-    
-    # If no data could be extracted, use sample data
-    if not benchmark_data or not benchmark_data.get('visualizations'):
-        benchmark_data = generate_sample_benchmark_data(model_name)
-    
-    return benchmark_data
+    """Load benchmark data from real results"""
+    return extract_real_benchmark_data(model_name, output_dir)
 
 def extract_data_from_html_files(model_name, output_dir):
     """Extract data from HTML visualization files"""
@@ -73,41 +56,536 @@ def extract_data_from_html_files(model_name, output_dir):
             except Exception as e:
                 print(f"Error extracting data from {viz_path}: {e}")
     
+    # Also try to extract metrics from index.html if it exists
+    index_path = os.path.join(model_dir, 'index.html')
+    if os.path.exists(index_path):
+        try:
+            with open(index_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Extract overall improvement
+            improvement_span = soup.select('.improvement')
+            if improvement_span:
+                overall_improvement = improvement_span[0].text.strip('%').strip()
+                benchmark_data['overall_improvement'] = float(overall_improvement)
+            
+            # Extract metrics from table
+            metrics_table = {}
+            table_rows = soup.select('table tr')[1:]  # Skip header row
+            
+            for row in table_rows:
+                cells = row.select('td')
+                if len(cells) >= 4:
+                    metric_name = cells[0].text.strip()
+                    baseline_value = float(cells[1].text.strip())
+                    episodic_value = float(cells[2].text.strip())
+                    improvement = cells[3].text.strip('%').strip()
+                    # Remove + sign if present
+                    if improvement.startswith('+'):
+                        improvement = improvement[1:]
+                    improvement = float(improvement)
+                    
+                    metrics_table[metric_name] = {
+                        'baseline': baseline_value,
+                        'episodic': episodic_value,
+                        'improvement': improvement
+                    }
+            
+            benchmark_data['metrics_table'] = metrics_table
+        except Exception as e:
+            print(f"Error extracting metrics from index.html: {e}")
+    
     return benchmark_data
 
-def generate_sample_benchmark_data(model_name):
-    """Generate sample benchmark data for visualizations"""
-    return {
-        'model': model_name,
-        'visualizations': {
-            'capabilities_radar': {
-                'theta': ['Entity Recognition', 'Context Retention', 'Memory Accuracy', 'Response Time', 'Temporal Consistency', 'Relationship Tracking'],
-                'r': [0.85, 0.92, 0.88, 0.75, 0.90, 0.82]
-            },
-            'comprehensive_comparison': {
-                'metrics': ['Context Preservation', 'Relevance', 'Entity Recall', 'Factual Accuracy', 'Memory Accuracy'],
-                'traditional': [0.72, 0.68, 0.65, 0.78, 0],
-                'episodic': [0.89, 0.82, 0.85, 0.88, 0.79]
-            },
-            'entity_recall_comparison': {
-                'x': ['Person', 'Location', 'Organization', 'Date', 'Event', 'Concept'],
-                'y': [0.92, 0.88, 0.85, 0.90, 0.82, 0.78]
-            },
-            'memory_accuracy': {
-                'x': ['Short-term', 'Medium-term', 'Long-term'],
-                'y': [0.95, 0.88, 0.82]
-            },
-            'response_time_comparison': {
-                'x': ['Simple Query', 'Complex Query', 'Multi-turn', 'Entity-heavy', 'Temporal Query'],
-                'traditional': [100, 150, 180, 160, 200],
-                'episodic': [120, 180, 210, 190, 230]
-            },
-            'improvement_summary': {
-                'x': ['Entity Recognition', 'Context Retention', 'Memory Accuracy', 'Response Time', 'Temporal Consistency'],
-                'y': [0.25, 0.35, 0.30, -0.15, 0.40]
-            }
+def extract_real_benchmark_data(model_name, output_dir='visualizations'):
+    """Extract real benchmark data from visualization files"""
+    # First check if detailed results file exists
+    detailed_results_files = []
+    for file in os.listdir(output_dir):
+        if file.startswith('benchmark_detailed_results_') and file.endswith('.txt'):
+            detailed_results_files.append(os.path.join(output_dir, file))
+    
+    # Sort by modification time to get the most recent one
+    if detailed_results_files:
+        detailed_results_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+        detailed_results_path = detailed_results_files[0]
+        
+        # Extract data from the detailed results file
+        try:
+            model_results = extract_metrics_from_detailed_results(detailed_results_path)
+            if model_name in model_results:
+                return {
+                    'model': model_name,
+                    'visualizations': create_visualizations_from_metrics(model_results[model_name]),
+                    'metrics_table': model_results[model_name]['metrics_table'],
+                    'overall_improvement': model_results[model_name].get('overall_improvement', 0)
+                }
+        except Exception as e:
+            print(f"Error extracting metrics from detailed results: {e}")
+    
+    # Fall back to extracting from HTML files
+    return extract_data_from_html_files(model_name, output_dir)
+
+def extract_metrics_from_detailed_results(file_path):
+    """Extract metrics from detailed results text file"""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        model_sections = re.split(r'={10,}\s+BENCHMARKING\s+([\w\.\-]+)\s+={10,}', content)
+        
+        model_results = {}
+        current_model = None
+        
+        for i, section in enumerate(model_sections):
+            if i == 0:  # Skip the file header
+                continue
+                
+            if i % 2 == 1:  # This is a model name
+                current_model = section.strip()
+                model_results[current_model] = {
+                    'metrics_table': {},
+                    'baseline': {},
+                    'episodic': {}
+                }
+            else:  # This is the model's content
+                if current_model:
+                    # Extract Baseline Metrics
+                    baseline_match = re.search(r'Baseline Metrics:(.*?)(?=Episodic Memory Metrics:)', section, re.DOTALL)
+                    if baseline_match:
+                        baseline_text = baseline_match.group(1).strip()
+                        metrics = parse_metrics_section(baseline_text)
+                        model_results[current_model]['baseline'] = metrics
+                    
+                    # Extract Episodic Memory Metrics
+                    episodic_match = re.search(r'Episodic Memory Metrics:(.*?)(?=Improvements:)', section, re.DOTALL)
+                    if episodic_match:
+                        episodic_text = episodic_match.group(1).strip()
+                        metrics = parse_metrics_section(episodic_text)
+                        model_results[current_model]['episodic'] = metrics
+                    
+                    # Extract Improvements
+                    improvements_match = re.search(r'Improvements:(.*?)(?=\n\n|$)', section, re.DOTALL)
+                    if improvements_match:
+                        improvements_text = improvements_match.group(1).strip()
+                        improvements = {}
+                        
+                        for line in improvements_text.split('\n'):
+                            if ':' in line:
+                                key, value = line.split(':', 1)
+                                key = key.strip()
+                                value = value.strip().rstrip('%')
+                                if value.startswith('+'):
+                                    value = value[1:]
+                                try:
+                                    improvements[key] = float(value)
+                                except ValueError:
+                                    continue
+                        
+                        # Calculate overall improvement
+                        if improvements:
+                            overall_improvement = sum(improvements.values()) / len(improvements)
+                            model_results[current_model]['overall_improvement'] = overall_improvement
+                        
+                        # Create metrics table
+                        metrics_table = {}
+                        for key in model_results[current_model]['baseline'].keys():
+                            if key in model_results[current_model]['episodic'] and key in improvements:
+                                metrics_table[key] = {
+                                    'baseline': model_results[current_model]['baseline'][key],
+                                    'episodic': model_results[current_model]['episodic'][key],
+                                    'improvement': improvements[key]
+                                }
+                        
+                        model_results[current_model]['metrics_table'] = metrics_table
+        
+        return model_results
+    
+    except Exception as e:
+        print(f"Error parsing detailed results file: {e}")
+        return {}
+
+def parse_metrics_section(text):
+    """Parse metrics from a text section"""
+    metrics = {}
+    for line in text.split('\n'):
+        if ':' in line:
+            key, value = line.split(':', 1)
+            key = key.strip()
+            value = value.strip()
+            try:
+                metrics[key] = float(value)
+            except ValueError:
+                continue
+    return metrics
+
+def create_visualizations_from_metrics(model_data):
+    """Create visualization data structures from extracted metrics"""
+    visualizations = {}
+    
+    # Comprehensive comparison
+    if 'baseline' in model_data and 'episodic' in model_data:
+        metrics = []
+        traditional = []
+        episodic = []
+        
+        for key in model_data['metrics_table'].keys():
+            metrics.append(key)
+            traditional.append(model_data['metrics_table'][key]['baseline'])
+            episodic.append(model_data['metrics_table'][key]['episodic'])
+        
+        visualizations['comprehensive_comparison'] = {
+            'metrics': metrics,
+            'traditional': traditional,
+            'episodic': episodic
         }
-    }
+    
+    # Improvement summary
+    if 'metrics_table' in model_data:
+        metrics = []
+        improvements = []
+        
+        for key, values in model_data['metrics_table'].items():
+            metrics.append(key)
+            improvements.append(values['improvement'])
+        
+        visualizations['improvement_summary'] = {
+            'x': metrics,
+            'y': improvements
+        }
+    
+    return visualizations
+
+def create_cross_model_comparison(output_dir='visualizations'):
+    """Create comparison visualizations across all models"""
+    # Get all model directories
+    model_dirs = []
+    for item in os.listdir(output_dir):
+        item_path = os.path.join(output_dir, item)
+        if os.path.isdir(item_path) and item != 'all_models':
+            model_dirs.append(item)
+    
+    if not model_dirs:
+        return {}
+    
+    # Create all_models directory if it doesn't exist
+    all_models_dir = os.path.join(output_dir, 'all_models')
+    os.makedirs(all_models_dir, exist_ok=True)
+    
+    # Extract data for each model
+    model_data = {}
+    for model in model_dirs:
+        data = extract_real_benchmark_data(model, output_dir)
+        model_data[model] = data
+    
+    # Create comparison visualizations
+    comparisons = {}
+    
+    # Create metrics comparison
+    metrics_comparison = create_metrics_comparison(model_data, all_models_dir)
+    comparisons['metrics_comparison'] = metrics_comparison
+    
+    # Create overall improvement comparison
+    improvement_comparison = create_improvement_comparison(model_data, all_models_dir)
+    comparisons['improvement_comparison'] = improvement_comparison
+    
+    return comparisons
+
+def create_metrics_comparison(model_data, output_dir):
+    """Create a comparison of metrics across all models"""
+    # Common metrics across all models
+    common_metrics = set()
+    for model, data in model_data.items():
+        if 'metrics_table' in data:
+            common_metrics.update(data['metrics_table'].keys())
+    
+    common_metrics = list(common_metrics)
+    
+    # For each common metric, compare across models
+    for metric in common_metrics:
+        # Create a bar chart comparing this metric across models
+        plt.figure(figsize=(12, 8))
+        plt.style.use('ggplot')
+        
+        models = []
+        baseline_values = []
+        episodic_values = []
+        
+        for model, data in model_data.items():
+            if 'metrics_table' in data and metric in data['metrics_table']:
+                models.append(model)
+                baseline_values.append(data['metrics_table'][metric]['baseline'])
+                episodic_values.append(data['metrics_table'][metric]['episodic'])
+        
+        # Set up the bar positions
+        x = np.arange(len(models))
+        width = 0.35
+        
+        fig, ax = plt.subplots(figsize=(14, 8))
+        rects1 = ax.bar(x - width/2, baseline_values, width, label='Traditional LLM', color='#636EFA')
+        rects2 = ax.bar(x + width/2, episodic_values, width, label='Episodic Memory', color='#EF553B')
+        
+        # Add labels and title
+        metric_title = metric.replace('_', ' ').title()
+        ax.set_xlabel('Models', fontweight='bold')
+        ax.set_ylabel(f'{metric_title}', fontweight='bold')
+        ax.set_title(f'{metric_title} Comparison Across Models', fontsize=16, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(models, rotation=45, ha='right')
+        ax.legend()
+        
+        # Add data labels
+        def add_labels(rects):
+            for rect in rects:
+                height = rect.get_height()
+                ax.annotate(f'{height:.2f}',
+                            xy=(rect.get_x() + rect.get_width() / 2, height),
+                            xytext=(0, 3),
+                            textcoords="offset points",
+                            ha='center', va='bottom', fontweight='bold')
+        
+        add_labels(rects1)
+        add_labels(rects2)
+        
+        # Add improvement percentages
+        for i in range(len(models)):
+            if baseline_values[i] > 0:
+                improvement = ((episodic_values[i] - baseline_values[i]) / baseline_values[i]) * 100
+                color = 'green' if improvement > 0 else 'red'
+                sign = '+' if improvement > 0 else ''
+                ax.annotate(f'{sign}{improvement:.1f}%',
+                            xy=(x[i] + width/2, episodic_values[i]),
+                            xytext=(0, 10),
+                            textcoords="offset points",
+                            ha='center', va='bottom',
+                            color=color, fontweight='bold')
+        
+        plt.tight_layout()
+        
+        # Create images directory if it doesn't exist
+        images_dir = os.path.join(output_dir, 'images')
+        os.makedirs(images_dir, exist_ok=True)
+        
+        # Save the figure to a file
+        metric_filename = metric.lower().replace(' ', '_')
+        img_path = os.path.join(images_dir, f"{metric_filename}_comparison.png")
+        plt.savefig(img_path, format='png', dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    # Create HTML for all metrics comparisons
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Cross-Model Metrics Comparison</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }
+            h1, h2 { color: #333; }
+            .summary { margin: 20px 0; padding: 15px; background-color: #f5f5f5; border-radius: 5px; }
+            .vis-container { margin: 20px 0; }
+            img { max-width: 100%; height: auto; }
+        </style>
+    </head>
+    <body>
+        <h1>Cross-Model Metrics Comparison</h1>
+        <div class="summary">
+            <h2>Summary</h2>
+            <p>This page shows comparisons of various metrics across all benchmarked models.</p>
+            <p><strong>Generated:</strong> """ + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + """</p>
+        </div>
+        
+        <h2>Metric Comparisons</h2>
+    """
+    
+    for metric in common_metrics:
+        metric_title = metric.replace('_', ' ').title()
+        metric_filename = metric.lower().replace(' ', '_')
+        html_content += f"""
+        <div class="vis-container">
+            <h3>{metric_title} Comparison</h3>
+            <img src="images/{metric_filename}_comparison.png" alt="{metric_title} Comparison">
+        </div>
+        """
+    
+    html_content += """
+    </body>
+    </html>
+    """
+    
+    # Write HTML file
+    with open(os.path.join(output_dir, 'metrics_comparison.html'), 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    return common_metrics
+
+def create_improvement_comparison(model_data, output_dir):
+    """Create a comparison of overall improvements across all models"""
+    plt.figure(figsize=(12, 8))
+    plt.style.use('ggplot')
+    
+    models = []
+    improvements = []
+    
+    for model, data in model_data.items():
+        if 'overall_improvement' in data:
+            models.append(model)
+            improvements.append(data['overall_improvement'])
+    
+    if not models:
+        return
+    
+    # Create a bar chart
+    colors = ['#2ecc71' if imp >= 0 else '#e74c3c' for imp in improvements]
+    bars = plt.bar(models, improvements, color=colors, edgecolor='#333333', alpha=0.8)
+    
+    # Add data labels
+    for bar in bars:
+        height = bar.get_height()
+        color = 'green' if height >= 0 else 'red'
+        sign = '+' if height >= 0 else ''
+        plt.text(bar.get_x() + bar.get_width()/2., height + 0.5,
+                f'{sign}{height:.1f}%', ha='center', va='bottom', 
+                fontweight='bold', color=color)
+    
+    plt.xlabel('Models', fontweight='bold')
+    plt.ylabel('Overall Improvement (%)', fontweight='bold')
+    plt.title('Overall Improvement Comparison Across Models', fontsize=16, fontweight='bold')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    
+    # Add a grid for better readability
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    
+    # Add a horizontal line at y=0
+    plt.axhline(y=0, color='#7f8c8d', linestyle='-', alpha=0.3)
+    
+    # Create images directory if it doesn't exist
+    images_dir = os.path.join(output_dir, 'images')
+    os.makedirs(images_dir, exist_ok=True)
+    
+    # Save the figure to a file
+    img_path = os.path.join(images_dir, f"overall_improvement_comparison.png")
+    plt.savefig(img_path, format='png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Create HTML file
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Overall Improvement Comparison</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }
+            h1, h2 { color: #333; }
+            .summary { margin: 20px 0; padding: 15px; background-color: #f5f5f5; border-radius: 5px; }
+            .vis-container { margin: 20px 0; }
+            img { max-width: 100%; height: auto; }
+        </style>
+    </head>
+    <body>
+        <h1>Overall Improvement Comparison</h1>
+        <div class="summary">
+            <h2>Summary</h2>
+            <p>This visualization shows the overall improvement percentage for each model when using episodic memory.</p>
+            <p><strong>Generated:</strong> """ + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + """</p>
+        </div>
+        
+        <div class="vis-container">
+            <img src="images/overall_improvement_comparison.png" alt="Overall Improvement Comparison">
+        </div>
+        
+        <h2>Model Rankings</h2>
+        <table border="1" cellpadding="5" style="border-collapse: collapse; width: 100%;">
+            <tr>
+                <th>Rank</th>
+                <th>Model</th>
+                <th>Overall Improvement</th>
+            </tr>
+    """
+    
+    # Add model rankings
+    model_rankings = sorted(zip(models, improvements), key=lambda x: x[1], reverse=True)
+    for i, (model, improvement) in enumerate(model_rankings, 1):
+        sign = '+' if improvement >= 0 else ''
+        color = 'green' if improvement >= 0 else 'red'
+        html_content += f"""
+            <tr>
+                <td>{i}</td>
+                <td>{model}</td>
+                <td style="color: {color};">{sign}{improvement:.2f}%</td>
+            </tr>
+        """
+    
+    html_content += """
+        </table>
+    </body>
+    </html>
+    """
+    
+    # Write HTML file
+    with open(os.path.join(output_dir, 'overall_improvement_comparison.html'), 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    # Create index.html for all_models
+    create_all_models_index(output_dir, models)
+    
+    return models
+
+def create_all_models_index(output_dir, models):
+    """Create an index.html file for the all_models directory"""
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>All Models Comparison</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }
+            h1, h2 { color: #333; }
+            .summary { margin: 20px 0; padding: 15px; background-color: #f5f5f5; border-radius: 5px; }
+            .nav-links { margin: 20px 0; }
+            .nav-links a { margin-right: 20px; text-decoration: none; color: #3498db; font-weight: bold; }
+            .nav-links a:hover { text-decoration: underline; }
+            .model-list { margin: 20px 0; }
+            .model-list a { display: block; margin: 10px 0; text-decoration: none; color: #333; }
+            .model-list a:hover { text-decoration: underline; color: #3498db; }
+        </style>
+    </head>
+    <body>
+        <h1>All Models Comparison</h1>
+        <div class="summary">
+            <h2>Summary</h2>
+            <p>This page provides access to comparisons across all benchmarked models.</p>
+            <p><strong>Generated:</strong> """ + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + """</p>
+        </div>
+        
+        <div class="nav-links">
+            <a href="overall_improvement_comparison.html">Overall Improvement Comparison</a>
+            <a href="metrics_comparison.html">Metrics Comparison</a>
+        </div>
+        
+        <h2>Individual Model Results</h2>
+        <div class="model-list">
+    """
+    
+    for model in models:
+        html_content += f"""
+            <a href="../{model}/index.html">{model}</a>
+        """
+    
+    html_content += """
+        </div>
+    </body>
+    </html>
+    """
+    
+    # Write HTML file
+    with open(os.path.join(output_dir, 'index.html'), 'w', encoding='utf-8') as f:
+        f.write(html_content)
 
 def create_capabilities_radar(data, title, output_dir=None, viz_name=None):
     """Create a radar chart for capabilities"""

@@ -43,3 +43,5 @@ Thumbs.db
 
 # Temp Files (Names just to prevent clutter and unnecessary files)
 plots_viz.py
+chroma_db/0b0ed8ff-a79a-4d5c-b49b-8913eefdbe4d/length.bin
+chroma_db/chroma.sqlite3
